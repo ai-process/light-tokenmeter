@@ -1,0 +1,8 @@
+.git
+.env
+.env.*
+*.md
+.idea/
+.vscode/
+bin/
+coverage.*

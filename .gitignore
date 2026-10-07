@@ -1,0 +1,17 @@
+# Binaries
+/bin/
+/light-tokenmeter
+*.exe
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Test coverage
+coverage.out
+coverage.html

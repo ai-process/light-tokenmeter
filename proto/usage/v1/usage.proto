@@ -1,0 +1,194 @@
+syntax = "proto3";
+
+package usage.v1;
+
+option go_package = "github.com/ai-process/light-tokenmeter/gen/usage/v1;usagev1";
+
+import "google/protobuf/timestamp.proto";
+
+// Status represents the outcome of an LLM request
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_SUCCESS = 1;
+  STATUS_ERROR = 2;
+  STATUS_CANCELLED = 3;
+  STATUS_TIMEOUT = 4;
+}
+
+// UsageEvent represents a single LLM usage event
+message UsageEvent {
+  // Unique identifier for this event (UUID), used for idempotency
+  string event_id = 1;
+  
+  // Timestamp when the event occurred (optional, server uses NOW() if not provided)
+  google.protobuf.Timestamp occurred_at = 2;
+  
+  // User identifier (max 256 chars)
+  string user_id = 3;
+  
+  // Project identifier (max 256 chars)
+  string project_id = 4;
+  
+  // Action identifier for debugging correlation (max 256 chars)
+  string action_id = 5;
+  
+  // LLM vendor (e.g., openai, anthropic, google)
+  string vendor = 6;
+  
+  // Model name (e.g., gpt-4o-mini, claude-3-sonnet)
+  string model = 7;
+  
+  // Request status
+  Status status = 8;
+  
+  // Request duration in milliseconds
+  int64 duration_ms = 9;
+  
+  // Input tokens count
+  int64 tokens_input = 10;
+  
+  // Output tokens count
+  int64 tokens_output = 11;
+  
+  // Total tokens (validated: must equal tokens_input + tokens_output if provided)
+  int64 tokens_total = 12;
+  
+  // Normalized error class (optional)
+  string error_class = 13;
+  
+  // Vendor HTTP status code (optional)
+  int32 vendor_http_status = 14;
+  
+  // Additional metadata as key-value pairs (optional, keep small)
+  map<string, string> meta = 15;
+}
+
+// RecordUsageEventRequest is the request for recording a single usage event
+message RecordUsageEventRequest {
+  UsageEvent event = 1;
+}
+
+// RecordUsageEventResponse is the response for recording a single usage event
+message RecordUsageEventResponse {
+  // Whether the event was newly created (false if duplicate event_id)
+  bool created = 1;
+}
+
+// RecordUsageEventsRequest is the request for recording multiple usage events
+message RecordUsageEventsRequest {
+  // Maximum 500 events per batch
+  repeated UsageEvent events = 1;
+}
+
+// RecordUsageEventsResponse is the response for recording multiple usage events
+message RecordUsageEventsResponse {
+  // Number of events that were newly created
+  int32 created_count = 1;
+  
+  // Number of events that were duplicates (already existed)
+  int32 duplicate_count = 2;
+}
+
+// GetUsageSummaryRequest is the request for getting usage summary
+message GetUsageSummaryRequest {
+  // Start of time range (inclusive)
+  google.protobuf.Timestamp from = 1;
+  
+  // End of time range (exclusive)
+  google.protobuf.Timestamp to = 2;
+  
+  // Optional filters
+  string project_id = 3;
+  string user_id = 4;
+  string vendor = 5;
+  string model = 6;
+  string action_id = 7;
+  Status status = 8;
+  
+  // Group by dimensions (day is always included)
+  bool group_by_project_id = 10;
+  bool group_by_user_id = 11;
+  bool group_by_vendor = 12;
+  bool group_by_model = 13;
+  bool group_by_action_id = 14;
+  bool group_by_status = 15;
+}
+
+// UsageSummaryRow represents a single row in the usage summary
+message UsageSummaryRow {
+  // Time bucket (day)
+  google.protobuf.Timestamp bucket = 1;
+  
+  // Dimension values (only populated if grouped by)
+  string project_id = 2;
+  string user_id = 3;
+  string vendor = 4;
+  string model = 5;
+  string action_id = 6;
+  Status status = 7;
+  
+  // Aggregated values
+  int64 tokens_input = 10;
+  int64 tokens_output = 11;
+  int64 tokens_total = 12;
+  int64 request_count = 13;
+  int64 sum_duration_ms = 14;
+}
+
+// GetUsageSummaryResponse is the response for getting usage summary
+message GetUsageSummaryResponse {
+  repeated UsageSummaryRow rows = 1;
+}
+
+// GetUsageByMetaRequest aggregates usage over events carrying a given meta
+// key/value (e.g. all events of one batch job, meta_key="job_id").
+message GetUsageByMetaRequest {
+  // Meta key to filter on (required, e.g. "job_id")
+  string meta_key = 1;
+
+  // Meta value to filter on (required, e.g. the job UUID)
+  string meta_value = 2;
+
+  // Optional second meta key to split rows by (e.g. "task_id");
+  // events without it aggregate under an empty group_value.
+  string group_by_meta_key = 3;
+
+  // Optional project filter
+  string project_id = 4;
+}
+
+// UsageByMetaRow is one aggregate bucket: (group_value, vendor, model).
+message UsageByMetaRow {
+  // Value of group_by_meta_key ("" when the key is absent or not requested)
+  string group_value = 1;
+
+  string vendor = 2;
+  string model = 3;
+
+  int64 tokens_input = 4;
+  int64 tokens_output = 5;
+  int64 tokens_total = 6;
+  int64 request_count = 7;
+}
+
+// GetUsageByMetaResponse is the response for meta-scoped aggregation
+message GetUsageByMetaResponse {
+  repeated UsageByMetaRow rows = 1;
+}
+
+// UsageService provides APIs for recording and querying LLM usage events
+service UsageService {
+  // RecordUsageEvent records a single usage event
+  rpc RecordUsageEvent(RecordUsageEventRequest) returns (RecordUsageEventResponse);
+  
+  // RecordUsageEvents records multiple usage events in a batch
+  rpc RecordUsageEvents(RecordUsageEventsRequest) returns (RecordUsageEventsResponse);
+  
+  // GetUsageSummary returns aggregated usage statistics
+  rpc GetUsageSummary(GetUsageSummaryRequest) returns (GetUsageSummaryResponse);
+
+  // GetUsageByMeta returns usage aggregated over events carrying a meta
+  // key/value, optionally split by a second meta key, always split by
+  // vendor and model.
+  rpc GetUsageByMeta(GetUsageByMetaRequest) returns (GetUsageByMetaResponse);
+}

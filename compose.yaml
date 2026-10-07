@@ -1,0 +1,34 @@
+# Local stack: light-tokenmeter plus Postgres.
+#
+#   docker compose up --build
+#   curl localhost:8080/readyz
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tokenmeter
+      POSTGRES_PASSWORD: tokenmeter
+      POSTGRES_DB: tokenmeter
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tokenmeter -d tokenmeter"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  light-tokenmeter:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://tokenmeter:tokenmeter@db:5432/tokenmeter?sslmode=disable
+    ports:
+      - "8080:8080" # HTTP
+      - "9090:9090" # gRPC
+
+volumes:
+  pgdata:
