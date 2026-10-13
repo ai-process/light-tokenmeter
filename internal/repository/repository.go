@@ -161,13 +161,13 @@ func (r *Repository) InsertBatch(ctx context.Context, events []*domain.UsageEven
 }
 
 // QuerySummary returns aggregated usage statistics
-func (r *Repository) QuerySummary(ctx context.Context, params domain.SummaryParams) ([]domain.SummaryRow, error) {
+func (r *Repository) QuerySummary(ctx context.Context, params domain.SummaryParams) ([]domain.SummaryRow, bool, error) {
 	// Build the query dynamically based on grouping options
 	var selectCols []string
 	var groupCols []string
 
-	// Always group by day
-	selectCols = append(selectCols, "date_trunc('day', created_at) AS bucket")
+	// Always group by day based on event time (occurred_at with created_at fallback)
+	selectCols = append(selectCols, "date_trunc('day', COALESCE(occurred_at, created_at)) AS bucket")
 	groupCols = append(groupCols, "bucket")
 
 	// Add optional dimensions
@@ -210,11 +210,11 @@ func (r *Repository) QuerySummary(ctx context.Context, params domain.SummaryPara
 	var args []interface{}
 	argNum := 1
 
-	whereClauses = append(whereClauses, fmt.Sprintf("created_at >= $%d", argNum))
+	whereClauses = append(whereClauses, fmt.Sprintf("COALESCE(occurred_at, created_at) >= $%d", argNum))
 	args = append(args, params.From)
 	argNum++
 
-	whereClauses = append(whereClauses, fmt.Sprintf("created_at < $%d", argNum))
+	whereClauses = append(whereClauses, fmt.Sprintf("COALESCE(occurred_at, created_at) < $%d", argNum))
 	args = append(args, params.To)
 	argNum++
 
@@ -255,7 +255,7 @@ func (r *Repository) QuerySummary(ctx context.Context, params domain.SummaryPara
 		WHERE %s
 		GROUP BY %s
 		ORDER BY bucket DESC
-		LIMIT 10000
+		LIMIT 10001
 	`,
 		strings.Join(selectCols, ", "),
 		strings.Join(whereClauses, " AND "),
@@ -266,7 +266,7 @@ func (r *Repository) QuerySummary(ctx context.Context, params domain.SummaryPara
 
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query summary: %w", err)
+		return nil, false, fmt.Errorf("query summary: %w", err)
 	}
 	defer rows.Close()
 
@@ -304,7 +304,7 @@ func (r *Repository) QuerySummary(ctx context.Context, params domain.SummaryPara
 		)
 
 		if err := rows.Scan(scanDest...); err != nil {
-			return nil, fmt.Errorf("scan row: %w", err)
+			return nil, false, fmt.Errorf("scan row: %w", err)
 		}
 
 		if params.GroupByStatus {
@@ -315,18 +315,41 @@ func (r *Repository) QuerySummary(ctx context.Context, params domain.SummaryPara
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows error: %w", err)
+		return nil, false, fmt.Errorf("rows error: %w", err)
 	}
 
-	return results, nil
+	truncated := false
+	if len(results) > 10000 {
+		truncated = true
+		results = results[:10000]
+	}
+
+	return results, truncated, nil
 }
 
 // QueryUsageByMeta aggregates usage over events carrying params.MetaKey =
 // params.MetaValue, split by (group meta value, vendor, model).
-func (r *Repository) QueryUsageByMeta(ctx context.Context, params domain.MetaUsageParams) ([]domain.MetaUsageRow, error) {
-	// Meta keys are JSONB path arguments, not identifiers, so they bind as
-	// ordinary query parameters.
-	query := `
+func (r *Repository) QueryUsageByMeta(ctx context.Context, params domain.MetaUsageParams) ([]domain.MetaUsageRow, bool, error) {
+	// Meta keys are JSONB path arguments, not identifiers.
+	// When filtering on job_id, include the literal condition `meta ? 'job_id'`
+	// and path expression so PostgreSQL can utilize the partial index
+	// idx_usage_events_meta_job (ON ((meta->>'job_id')) WHERE meta ? 'job_id').
+	var whereClause string
+	var args []interface{}
+	if params.MetaKey == "job_id" {
+		whereClause = "WHERE meta ? 'job_id' AND meta->>'job_id' = $2"
+		args = []interface{}{params.GroupByMetaKey, params.MetaValue}
+	} else {
+		whereClause = "WHERE meta->>$2 = $3"
+		args = []interface{}{params.GroupByMetaKey, params.MetaKey, params.MetaValue}
+	}
+
+	if params.ProjectID != "" {
+		whereClause += fmt.Sprintf(" AND project_id = $%d", len(args)+1)
+		args = append(args, params.ProjectID)
+	}
+
+	query := fmt.Sprintf(`
 		SELECT
 			COALESCE(meta->>$1, '') AS group_value,
 			vendor,
@@ -336,22 +359,15 @@ func (r *Repository) QueryUsageByMeta(ctx context.Context, params domain.MetaUsa
 			SUM(tokens_total) AS tokens_total,
 			COUNT(*) AS request_count
 		FROM usage_events
-		WHERE meta->>$2 = $3
-	`
-	args := []interface{}{params.GroupByMetaKey, params.MetaKey, params.MetaValue}
-	if params.ProjectID != "" {
-		query += ` AND project_id = $4`
-		args = append(args, params.ProjectID)
-	}
-	query += `
+		%s
 		GROUP BY group_value, vendor, model
 		ORDER BY group_value, vendor, model
-		LIMIT 10000
-	`
+		LIMIT 10001
+	`, whereClause)
 
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query usage by meta: %w", err)
+		return nil, false, fmt.Errorf("query usage by meta: %w", err)
 	}
 	defer rows.Close()
 
@@ -362,14 +378,21 @@ func (r *Repository) QueryUsageByMeta(ctx context.Context, params domain.MetaUsa
 			&row.GroupValue, &row.Vendor, &row.Model,
 			&row.TokensInput, &row.TokensOutput, &row.TokensTotal, &row.RequestCount,
 		); err != nil {
-			return nil, fmt.Errorf("scan meta usage row: %w", err)
+			return nil, false, fmt.Errorf("scan meta usage row: %w", err)
 		}
 		results = append(results, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows error: %w", err)
+		return nil, false, fmt.Errorf("rows error: %w", err)
 	}
-	return results, nil
+
+	truncated := false
+	if len(results) > 10000 {
+		truncated = true
+		results = results[:10000]
+	}
+
+	return results, truncated, nil
 }
 
 // Ping checks database connectivity

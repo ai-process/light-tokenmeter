@@ -92,7 +92,7 @@ database). The service is stateless, so run as many replicas as you like.
 
 ### From source
 
-Go 1.25+ and Postgres:
+Go 1.26+ and Postgres:
 
 ```bash
 make build                                   # → bin/light-tokenmeter
@@ -119,8 +119,8 @@ An event describes one model call:
 | `user_id` | string ≤256 | yes | Who the call was for. |
 | `project_id` | string ≤256 | yes | Which app or tenant. |
 | `action_id` | string ≤256 | yes | What it was for, e.g. `summarize-ticket`. |
-| `vendor` | string | yes | `openai`, `anthropic`, `google`, … (free-form). |
-| `model` | string | yes | Model name. |
+| `vendor` | string ≤64 | yes | `openai`, `anthropic`, `google`, … (free-form). |
+| `model` | string ≤128 | yes | Model name. |
 | `status` | string | yes | `success`, `error`, `cancelled` or `timeout`. |
 | `occurred_at` | RFC 3339 | no | When it happened; the server's clock is used otherwise. |
 | `duration_ms` | int | no | Call latency. |
@@ -178,15 +178,19 @@ yourself. The signals that usually separate greedy from worthy:
 - a large share of tokens spent on `status=error` or `timeout` (paying for failures),
 - an expensive model serving an `action_id` that a cheaper one handles equally well.
 
-Filters: `project_id`, `user_id`, `vendor`, `model`, `action_id`, `status`. Groupings:
+Filters: `project_id`, `user_id`, `vendor`, `model`, `action_id`, `status` (must be `success`, `error`, `cancelled`, or `timeout`; invalid values return 400). Groupings:
 `group_by_project_id`, `group_by_user_id`, `group_by_vendor`, `group_by_model`,
 `group_by_action_id`, `group_by_status` (each `=true`).
+
+Responses group by day based on event time (`occurred_at`, falling back to `created_at`). If query results exceed 10,000 rows, the response returns `truncated: true` and caps results at 10,000.
 
 ### Usage by your own metadata
 
 If you tag events with a key such as `job_id` in `meta`, the gRPC call `GetUsageByMeta`
 returns everything that job spent, split by vendor and model and optionally by a second
-meta key (say `task_id`). Lookups on `meta.job_id` are indexed.
+meta key (say `task_id`), plus an optional `project_id` filter. Lookups on `meta.job_id`
+are indexed via a partial expression index (`meta ? 'job_id'`). Responses include
+`truncated: true` if matching aggregate groups exceed 10,000 rows.
 
 ```bash
 grpcurl -plaintext -d '{"meta_key":"job_id","meta_value":"job-42","group_by_meta_key":"task_id"}' \
@@ -225,11 +229,14 @@ Environment variables (see [`env.example`](env.example)):
 | `GRPC_ADDR` | `:9090` | gRPC listen address. |
 | `HTTP_ADDR` | `:8080` | HTTP listen address. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
+| `LOG_FORMAT` | `json` | Log format: `json` (structured JSON on stdout) or `console` (colored human-readable). |
 | `SHUTDOWN_TIMEOUT` | `30s` | Graceful shutdown window. |
 | `DB_MAX_CONNS` / `DB_MIN_CONNS` | `25` / `5` | Connection pool bounds per replica. |
 | `SENTRY_DSN` | empty | Error reporting; empty disables it. |
 | `SENTRY_ENVIRONMENT` / `SENTRY_RELEASE` | `development` / empty | Sentry metadata. |
-| `SENTRY_ENABLE_TRACING` | `false` | Sentry tracing. |
+| `SENTRY_ENABLE_TRACING` | `false` | Sentry performance tracing. |
+| `SENTRY_DEBUG` | `false` | Enable Sentry SDK debug logging. |
+| `SENTRY_WITH_BREADCRUMBS` | `false` | Include breadcrumbs in Sentry error reports. |
 
 ## Security
 

@@ -735,6 +735,7 @@ func (x *UsageSummaryRow) GetSumDurationMs() int64 {
 type GetUsageSummaryResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Rows          []*UsageSummaryRow     `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
+	Truncated     bool                   `protobuf:"varint,2,opt,name=truncated,proto3" json:"truncated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -774,6 +775,13 @@ func (x *GetUsageSummaryResponse) GetRows() []*UsageSummaryRow {
 		return x.Rows
 	}
 	return nil
+}
+
+func (x *GetUsageSummaryResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
 }
 
 // GetUsageByMetaRequest aggregates usage over events carrying a given meta
@@ -949,6 +957,7 @@ func (x *UsageByMetaRow) GetRequestCount() int64 {
 type GetUsageByMetaResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Rows          []*UsageByMetaRow      `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
+	Truncated     bool                   `protobuf:"varint,2,opt,name=truncated,proto3" json:"truncated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -988,6 +997,13 @@ func (x *GetUsageByMetaResponse) GetRows() []*UsageByMetaRow {
 		return x.Rows
 	}
 	return nil
+}
+
+func (x *GetUsageByMetaResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
 }
 
 var File_usage_v1_usage_proto protoreflect.FileDescriptor
@@ -1060,9 +1076,10 @@ const file_usage_v1_usage_proto_rawDesc = "" +
 	"\rtokens_output\x18\v \x01(\x03R\ftokensOutput\x12!\n" +
 	"\ftokens_total\x18\f \x01(\x03R\vtokensTotal\x12#\n" +
 	"\rrequest_count\x18\r \x01(\x03R\frequestCount\x12&\n" +
-	"\x0fsum_duration_ms\x18\x0e \x01(\x03R\rsumDurationMs\"H\n" +
+	"\x0fsum_duration_ms\x18\x0e \x01(\x03R\rsumDurationMs\"f\n" +
 	"\x17GetUsageSummaryResponse\x12-\n" +
-	"\x04rows\x18\x01 \x03(\v2\x19.usage.v1.UsageSummaryRowR\x04rows\"\x9b\x01\n" +
+	"\x04rows\x18\x01 \x03(\v2\x19.usage.v1.UsageSummaryRowR\x04rows\x12\x1c\n" +
+	"\ttruncated\x18\x02 \x01(\bR\ttruncated\"\x9b\x01\n" +
 	"\x15GetUsageByMetaRequest\x12\x19\n" +
 	"\bmeta_key\x18\x01 \x01(\tR\ametaKey\x12\x1d\n" +
 	"\n" +
@@ -1078,9 +1095,10 @@ const file_usage_v1_usage_proto_rawDesc = "" +
 	"\ftokens_input\x18\x04 \x01(\x03R\vtokensInput\x12#\n" +
 	"\rtokens_output\x18\x05 \x01(\x03R\ftokensOutput\x12!\n" +
 	"\ftokens_total\x18\x06 \x01(\x03R\vtokensTotal\x12#\n" +
-	"\rrequest_count\x18\a \x01(\x03R\frequestCount\"F\n" +
+	"\rrequest_count\x18\a \x01(\x03R\frequestCount\"d\n" +
 	"\x16GetUsageByMetaResponse\x12,\n" +
-	"\x04rows\x18\x01 \x03(\v2\x18.usage.v1.UsageByMetaRowR\x04rows*p\n" +
+	"\x04rows\x18\x01 \x03(\v2\x18.usage.v1.UsageByMetaRowR\x04rows\x12\x1c\n" +
+	"\ttruncated\x18\x02 \x01(\bR\ttruncated*p\n" +
 	"\x06Status\x12\x16\n" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eSTATUS_SUCCESS\x10\x01\x12\x10\n" +

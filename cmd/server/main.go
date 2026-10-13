@@ -26,11 +26,11 @@ func main() {
 		// Not fatal - .env might not exist in production
 	}
 
-	// Initialize logger
-	logger.Init()
-
 	// Load configuration
 	cfg := config.Load()
+
+	// Initialize logger
+	logger.Init(cfg)
 
 	log.Info().
 		Str("grpc_addr", cfg.GRPCAddr).

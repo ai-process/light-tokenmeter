@@ -137,7 +137,7 @@ func (s *GRPCServer) GetUsageSummary(ctx context.Context, req *pb.GetUsageSummar
 		GroupByStatus:    req.GroupByStatus,
 	}
 
-	rows, err := s.service.GetSummary(ctx, params)
+	rows, truncated, err := s.service.GetSummary(ctx, params)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get usage summary")
 		return nil, status.Errorf(codes.Internal, "failed to get summary: %v", err)
@@ -161,7 +161,10 @@ func (s *GRPCServer) GetUsageSummary(ctx context.Context, req *pb.GetUsageSummar
 		})
 	}
 
-	return &pb.GetUsageSummaryResponse{Rows: pbRows}, nil
+	return &pb.GetUsageSummaryResponse{
+		Rows:      pbRows,
+		Truncated: truncated,
+	}, nil
 }
 
 // GetUsageByMeta returns usage aggregated over events carrying a meta
@@ -172,7 +175,7 @@ func (s *GRPCServer) GetUsageByMeta(ctx context.Context, req *pb.GetUsageByMetaR
 		return nil, status.Error(codes.InvalidArgument, "meta_key and meta_value are required")
 	}
 
-	rows, err := s.service.GetUsageByMeta(ctx, domain.MetaUsageParams{
+	rows, truncated, err := s.service.GetUsageByMeta(ctx, domain.MetaUsageParams{
 		MetaKey:        req.MetaKey,
 		MetaValue:      req.MetaValue,
 		GroupByMetaKey: req.GroupByMetaKey,
@@ -195,7 +198,10 @@ func (s *GRPCServer) GetUsageByMeta(ctx context.Context, req *pb.GetUsageByMetaR
 			RequestCount: row.RequestCount,
 		})
 	}
-	return &pb.GetUsageByMetaResponse{Rows: pbRows}, nil
+	return &pb.GetUsageByMetaResponse{
+		Rows:      pbRows,
+		Truncated: truncated,
+	}, nil
 }
 
 // protoToEvent converts a protobuf UsageEvent to domain.UsageEvent

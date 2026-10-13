@@ -10,15 +10,17 @@ import (
 	sentryzerolog "github.com/getsentry/sentry-go/zerolog"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+
+	"github.com/ai-process/light-tokenmeter/internal/config"
 )
 
 // Init initializes the global logger with proper configuration
-func Init() {
+func Init(cfg *config.Config) {
 	zerolog.TimeFieldFormat = time.RFC3339
 
-	logLevel := os.Getenv("LOG_LEVEL")
-	if logLevel == "" {
-		logLevel = "info"
+	logLevel := "info"
+	if cfg != nil && cfg.LogLevel != "" {
+		logLevel = cfg.LogLevel
 	}
 
 	var level zerolog.Level
@@ -39,22 +41,25 @@ func Init() {
 
 	var writers []io.Writer
 
-	consoleWriter := zerolog.ConsoleWriter{
-		Out:        os.Stdout,
-		TimeFormat: time.RFC3339,
+	if cfg != nil && cfg.LogFormat == "console" {
+		writers = append(writers, zerolog.ConsoleWriter{
+			Out:        os.Stdout,
+			TimeFormat: time.RFC3339,
+		})
+	} else {
+		writers = append(writers, os.Stdout)
 	}
-	writers = append(writers, consoleWriter)
 
 	// Initialize Sentry if DSN is provided
 	var sentryWriter *sentryzerolog.Writer
-	if sentryDSN := os.Getenv("SENTRY_DSN"); sentryDSN != "" {
+	if cfg != nil && cfg.SentryDSN != "" {
 		err := sentry.Init(sentry.ClientOptions{
-			Dsn:              sentryDSN,
-			Debug:            os.Getenv("SENTRY_DEBUG") == "true",
-			EnableTracing:    os.Getenv("SENTRY_ENABLE_TRACING") == "true",
+			Dsn:              cfg.SentryDSN,
+			Debug:            cfg.SentryDebug,
+			EnableTracing:    cfg.SentryTracing,
 			TracesSampleRate: 1.0,
-			Environment:      os.Getenv("SENTRY_ENVIRONMENT"),
-			Release:          os.Getenv("SENTRY_RELEASE"),
+			Environment:      cfg.SentryEnvironment,
+			Release:          cfg.SentryRelease,
 		})
 		if err != nil {
 			log.Fatal().Err(err).Msg("sentry.Init failed")
@@ -62,11 +67,11 @@ func Init() {
 
 		sentryWriter, err = sentryzerolog.New(sentryzerolog.Config{
 			ClientOptions: sentry.ClientOptions{
-				Dsn: sentryDSN,
+				Dsn: cfg.SentryDSN,
 			},
 			Options: sentryzerolog.Options{
 				Levels:          []zerolog.Level{zerolog.ErrorLevel, zerolog.FatalLevel, zerolog.PanicLevel},
-				WithBreadcrumbs: os.Getenv("SENTRY_WITH_BREADCRUMBS") == "true",
+				WithBreadcrumbs: cfg.SentryWithBreadcrumbs,
 				FlushTimeout:    3 * time.Second,
 			},
 		})

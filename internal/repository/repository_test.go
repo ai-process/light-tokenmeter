@@ -162,6 +162,32 @@ func TestValidateEvent(t *testing.T) {
 			},
 			wantErr: domain.ErrUserIDTooLong,
 		},
+		{
+			name: "vendor too long",
+			event: domain.UsageEvent{
+				EventID:   uuid.New(),
+				UserID:    "user-123",
+				ProjectID: "project-456",
+				ActionID:  "action-789",
+				Vendor:    string(make([]byte, 65)),
+				Model:     "gpt-4o-mini",
+				Status:    domain.StatusSuccess,
+			},
+			wantErr: domain.ErrVendorTooLong,
+		},
+		{
+			name: "model too long",
+			event: domain.UsageEvent{
+				EventID:   uuid.New(),
+				UserID:    "user-123",
+				ProjectID: "project-456",
+				ActionID:  "action-789",
+				Vendor:    "openai",
+				Model:     string(make([]byte, 129)),
+				Status:    domain.StatusSuccess,
+			},
+			wantErr: domain.ErrModelTooLong,
+		},
 	}
 
 	for _, tt := range tests {

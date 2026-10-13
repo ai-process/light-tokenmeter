@@ -155,7 +155,8 @@ type summaryRow struct {
 }
 
 type getSummaryResponse struct {
-	Rows []summaryRow `json:"rows"`
+	Rows      []summaryRow `json:"rows"`
+	Truncated bool         `json:"truncated"`
 }
 
 type errorResponse struct {
@@ -250,6 +251,15 @@ func (s *HTTPServer) handleGetSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	status := domain.StatusUnspecified
+	if statusStr := q.Get("status"); statusStr != "" {
+		status = domain.StatusFromString(statusStr)
+		if status == domain.StatusUnspecified {
+			writeError(w, http.StatusBadRequest, "validation_error", "Invalid 'status' parameter (expected success, error, cancelled, or timeout)", "")
+			return
+		}
+	}
+
 	params := domain.SummaryParams{
 		From:             from,
 		To:               to,
@@ -258,7 +268,7 @@ func (s *HTTPServer) handleGetSummary(w http.ResponseWriter, r *http.Request) {
 		Vendor:           q.Get("vendor"),
 		Model:            q.Get("model"),
 		ActionID:         q.Get("action_id"),
-		Status:           domain.StatusFromString(q.Get("status")),
+		Status:           status,
 		GroupByProjectID: q.Get("group_by_project_id") == "true",
 		GroupByUserID:    q.Get("group_by_user_id") == "true",
 		GroupByVendor:    q.Get("group_by_vendor") == "true",
@@ -267,7 +277,7 @@ func (s *HTTPServer) handleGetSummary(w http.ResponseWriter, r *http.Request) {
 		GroupByStatus:    q.Get("group_by_status") == "true",
 	}
 
-	rows, err := s.service.GetSummary(r.Context(), params)
+	rows, truncated, err := s.service.GetSummary(r.Context(), params)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get usage summary")
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to get summary", "")
@@ -292,7 +302,10 @@ func (s *HTTPServer) handleGetSummary(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeJSON(w, http.StatusOK, getSummaryResponse{Rows: respRows})
+	writeJSON(w, http.StatusOK, getSummaryResponse{
+		Rows:      respRows,
+		Truncated: truncated,
+	})
 }
 
 func httpRequestToEvent(req *recordEventRequest) (*domain.UsageEvent, error) {
