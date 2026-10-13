@@ -1,0 +1,229 @@
+package repository
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/ai-process/light-tokenmeter/internal/database"
+	"github.com/ai-process/light-tokenmeter/internal/domain"
+)
+
+func getTestPool(t *testing.T) (*pgxpool.Pool, *Repository) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://tokenmeter:tokenmeter@localhost:5433/tokenmeter?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	poolCfg, err := pgxpool.ParseConfig(dbURL)
+	if err != nil {
+		t.Skipf("cannot parse database config: %v", err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		t.Skipf("cannot connect to test postgres: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("cannot ping test postgres: %v", err)
+	}
+
+	if err := database.RunMigrations(ctx, dbURL); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	return pool, New(pool)
+}
+
+func TestExplainJobIdIndex(t *testing.T) {
+	pool, repo := getTestPool(t)
+	ctx := context.Background()
+
+	// Clear table and insert test data
+	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
+	require.NoError(t, err)
+
+	events := make([]*domain.UsageEvent, 0, 500)
+	for i := 0; i < 500; i++ {
+		events = append(events, &domain.UsageEvent{
+			EventID:      uuid.New(),
+			UserID:       "user-1",
+			ProjectID:    "proj-1",
+			ActionID:     "act-1",
+			Vendor:       "openai",
+			Model:        "gpt-4o",
+			Status:       domain.StatusSuccess,
+			TokensInput:  10,
+			TokensOutput: 20,
+			TokensTotal:  30,
+			Meta:         map[string]string{"job_id": fmt.Sprintf("job-%d", i%10)},
+		})
+	}
+	_, _, err = repo.InsertBatch(ctx, events)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, "VACUUM ANALYZE usage_events;")
+	require.NoError(t, err)
+
+	// Explain QueryUsageByMeta for job_id
+	explainQuery := `EXPLAIN SELECT COALESCE(meta->>$1, '') AS group_value, vendor, model,
+		SUM(tokens_input), SUM(tokens_output), SUM(tokens_total), COUNT(*)
+		FROM usage_events
+		WHERE meta ? 'job_id' AND meta->>'job_id' = $2
+		GROUP BY group_value, vendor, model`
+
+	rows, err := pool.Query(ctx, explainQuery, "", "job-1")
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var planLines []string
+	for rows.Next() {
+		var line string
+		err := rows.Scan(&line)
+		require.NoError(t, err)
+		planLines = append(planLines, line)
+	}
+
+	plan := fmt.Sprint(planLines)
+	assert.Contains(t, plan, "idx_usage_events_meta_job", "expected plan to use idx_usage_events_meta_job index")
+}
+
+func TestQuerySummary_OccurredAt(t *testing.T) {
+	pool, repo := getTestPool(t)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	occurred3DaysAgo := now.Add(-72 * time.Hour)
+
+	// Insert event with past occurred_at
+	_, err = repo.InsertOne(ctx, &domain.UsageEvent{
+		EventID:      uuid.New(),
+		OccurredAt:   &occurred3DaysAgo,
+		UserID:       "backfill-user",
+		ProjectID:    "backfill-proj",
+		ActionID:     "act",
+		Vendor:       "openai",
+		Model:        "gpt-4o",
+		Status:       domain.StatusSuccess,
+		TokensInput:  100,
+		TokensOutput: 200,
+		TokensTotal:  300,
+	})
+	require.NoError(t, err)
+
+	// Query summary covering occurred3DaysAgo
+	summaryRows, truncated, err := repo.QuerySummary(ctx, domain.SummaryParams{
+		From:             now.Add(-96 * time.Hour),
+		To:               now.Add(-48 * time.Hour),
+		GroupByProjectID: true,
+	})
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	require.Len(t, summaryRows, 1)
+	assert.Equal(t, int64(300), summaryRows[0].TokensTotal)
+
+	// Query summary covering only today (should not find the backfilled event)
+	todaySummary, _, err := repo.QuerySummary(ctx, domain.SummaryParams{
+		From:             now.Add(-12 * time.Hour),
+		To:               now.Add(12 * time.Hour),
+		GroupByProjectID: true,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, todaySummary, "event with past occurred_at should not appear in today's summary")
+}
+
+func TestQuerySummary_TruncatedFlag(t *testing.T) {
+	pool, repo := getTestPool(t)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+
+	// Insert 10005 events with different action_ids so grouping produces 10005 rows
+	// We can generate rows directly using generate_series for speed
+	insertSQL := `
+		INSERT INTO usage_events (
+			event_id, created_at, occurred_at, user_id, project_id, action_id,
+			vendor, model, status, tokens_input, tokens_output, tokens_total
+		)
+		SELECT
+			gen_random_uuid(),
+			$1,
+			$1,
+			'u1',
+			'p1',
+			'act-' || i::text,
+			'openai',
+			'gpt-4o',
+			1,
+			10,
+			20,
+			30
+		FROM generate_series(1, 10005) AS s(i);
+	`
+	_, err = pool.Exec(ctx, insertSQL, now)
+	require.NoError(t, err)
+
+	rows, truncated, err := repo.QuerySummary(ctx, domain.SummaryParams{
+		From:            now.Add(-1 * time.Hour),
+		To:              now.Add(1 * time.Hour),
+		GroupByActionID: true,
+	})
+	require.NoError(t, err)
+	assert.True(t, truncated, "expected truncated to be true when exceeding 10000 rows")
+	assert.Len(t, rows, 10000, "expected exactly 10000 rows when truncated")
+}
+
+func TestQueryUsageByMeta_TruncatedFlag(t *testing.T) {
+	pool, repo := getTestPool(t)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
+	require.NoError(t, err)
+
+	// Insert 10005 events with same job_id but different group_by_meta_key values
+	insertSQL := `
+		INSERT INTO usage_events (
+			event_id, user_id, project_id, action_id,
+			vendor, model, status, tokens_input, tokens_output, tokens_total, meta
+		)
+		SELECT
+			gen_random_uuid(),
+			'u1',
+			'p1',
+			'act',
+			'openai',
+			'gpt-4o',
+			1,
+			10,
+			20,
+			30,
+			jsonb_build_object('job_id', 'job-xyz', 'task_id', 'task-' || i::text)
+		FROM generate_series(1, 10005) AS s(i);
+	`
+	_, err = pool.Exec(ctx, insertSQL)
+	require.NoError(t, err)
+
+	rows, truncated, err := repo.QueryUsageByMeta(ctx, domain.MetaUsageParams{
+		MetaKey:        "job_id",
+		MetaValue:      "job-xyz",
+		GroupByMetaKey: "task_id",
+	})
+	require.NoError(t, err)
+	assert.True(t, truncated, "expected truncated to be true when exceeding 10000 rows")
+	assert.Len(t, rows, 10000, "expected exactly 10000 rows when truncated")
+}

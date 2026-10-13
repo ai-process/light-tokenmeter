@@ -82,12 +82,16 @@ var (
 	ErrUserIDTooLong    = errors.New("user_id exceeds 256 characters")
 	ErrProjectIDTooLong = errors.New("project_id exceeds 256 characters")
 	ErrActionIDTooLong  = errors.New("action_id exceeds 256 characters")
+	ErrVendorTooLong    = errors.New("vendor exceeds 64 characters")
+	ErrModelTooLong     = errors.New("model exceeds 128 characters")
 	ErrTokensMismatch   = errors.New("tokens_total must equal tokens_input + tokens_output")
 	ErrBatchTooLarge    = errors.New("batch size exceeds maximum of 500 events")
 )
 
 const (
 	MaxStringLength = 256
+	MaxVendorLength = 64
+	MaxModelLength  = 128
 	MaxBatchSize    = 500
 )
 
@@ -117,8 +121,14 @@ func (e *UsageEvent) Validate() error {
 	if e.Vendor == "" {
 		return ErrEmptyVendor
 	}
+	if len(e.Vendor) > MaxVendorLength {
+		return ErrVendorTooLong
+	}
 	if e.Model == "" {
 		return ErrEmptyModel
+	}
+	if len(e.Model) > MaxModelLength {
+		return ErrModelTooLong
 	}
 	if e.Status == StatusUnspecified {
 		return ErrInvalidStatus

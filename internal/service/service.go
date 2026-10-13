@@ -60,34 +60,36 @@ func (s *UsageService) RecordEvents(ctx context.Context, events []*domain.UsageE
 }
 
 // GetSummary returns aggregated usage statistics
-func (s *UsageService) GetSummary(ctx context.Context, params domain.SummaryParams) ([]domain.SummaryRow, error) {
-	rows, err := s.repo.QuerySummary(ctx, params)
+func (s *UsageService) GetSummary(ctx context.Context, params domain.SummaryParams) ([]domain.SummaryRow, bool, error) {
+	rows, truncated, err := s.repo.QuerySummary(ctx, params)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	log.Debug().
 		Int("rows", len(rows)).
+		Bool("truncated", truncated).
 		Time("from", params.From).
 		Time("to", params.To).
 		Msg("queried usage summary")
 
-	return rows, nil
+	return rows, truncated, nil
 }
 
 // GetUsageByMeta returns usage aggregated over events carrying a meta
 // key/value, split by an optional second meta key plus vendor and model.
-func (s *UsageService) GetUsageByMeta(ctx context.Context, params domain.MetaUsageParams) ([]domain.MetaUsageRow, error) {
-	rows, err := s.repo.QueryUsageByMeta(ctx, params)
+func (s *UsageService) GetUsageByMeta(ctx context.Context, params domain.MetaUsageParams) ([]domain.MetaUsageRow, bool, error) {
+	rows, truncated, err := s.repo.QueryUsageByMeta(ctx, params)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	log.Debug().
 		Int("rows", len(rows)).
+		Bool("truncated", truncated).
 		Str("meta_key", params.MetaKey).
 		Str("group_by", params.GroupByMetaKey).
 		Msg("queried usage by meta")
 
-	return rows, nil
+	return rows, truncated, nil
 }

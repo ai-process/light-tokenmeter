@@ -138,6 +138,7 @@ message UsageSummaryRow {
 // GetUsageSummaryResponse is the response for getting usage summary
 message GetUsageSummaryResponse {
   repeated UsageSummaryRow rows = 1;
+  bool truncated = 2;
 }
 
 // GetUsageByMetaRequest aggregates usage over events carrying a given meta
@@ -174,6 +175,7 @@ message UsageByMetaRow {
 // GetUsageByMetaResponse is the response for meta-scoped aggregation
 message GetUsageByMetaResponse {
   repeated UsageByMetaRow rows = 1;
+  bool truncated = 2;
 }
 
 // UsageService provides APIs for recording and querying LLM usage events
