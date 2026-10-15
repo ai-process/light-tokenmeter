@@ -18,6 +18,8 @@ import (
 	"github.com/ai-process/light-tokenmeter/internal/logger"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 	"github.com/ai-process/light-tokenmeter/internal/server"
+	"github.com/ai-process/light-tokenmeter/internal/service"
+	"github.com/ai-process/light-tokenmeter/internal/storage/clickhouse"
 )
 
 func main() {
@@ -61,9 +63,46 @@ func main() {
 	// Create repository
 	repo := repository.New(pool)
 
+	// Create usage service
+	usageSvc := service.NewUsageService(repo)
+
+	var chClient *clickhouse.Client
+	var chWriter *clickhouse.BatchWriter
+
+	if cfg.ClickHouseEnabled {
+		log.Info().
+			Str("addr", cfg.ClickHouseAddr).
+			Str("db", cfg.ClickHouseDatabase).
+			Int("batch_size", cfg.ClickHouseBatchSize).
+			Dur("flush_interval", cfg.ClickHouseFlushInterval).
+			Msg("initializing ClickHouse storage")
+
+		var err error
+		chClient, err = clickhouse.Connect(ctx, clickhouse.Config{
+			Addr:          cfg.ClickHouseAddr,
+			Database:      cfg.ClickHouseDatabase,
+			User:          cfg.ClickHouseUser,
+			Password:      cfg.ClickHousePassword,
+			BatchSize:     cfg.ClickHouseBatchSize,
+			FlushInterval: cfg.ClickHouseFlushInterval,
+		})
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to connect to ClickHouse")
+		}
+
+		if err := chClient.EnsureSchema(ctx); err != nil {
+			log.Fatal().Err(err).Msg("failed to run ClickHouse migrations")
+		}
+
+		chWriter = clickhouse.NewBatchWriter(chClient.Conn(), cfg.ClickHouseBatchSize, cfg.ClickHouseFlushInterval)
+		chWriter.Start()
+
+		usageSvc = usageSvc.WithAnalytics(chClient).WithEventSink(chWriter)
+	}
+
 	// Create servers
-	grpcServer := server.NewGRPCServer(repo, cfg.GRPCAddr)
-	httpServer := server.NewHTTPServer(repo, cfg.HTTPAddr)
+	grpcServer := server.NewGRPCServerWithService(usageSvc, cfg.GRPCAddr)
+	httpServer := server.NewHTTPServerWithService(usageSvc, repo, cfg.HTTPAddr)
 
 	// Start gRPC server in goroutine
 	grpcErrCh := make(chan error, 1)
@@ -105,6 +144,18 @@ func main() {
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Error().Err(err).Msg("HTTP server shutdown error")
+	}
+
+	// Flush and close ClickHouse batch writer and client
+	if chWriter != nil {
+		if err := chWriter.Close(); err != nil {
+			log.Error().Err(err).Msg("ClickHouse batch writer close error")
+		}
+	}
+	if chClient != nil {
+		if err := chClient.Close(); err != nil {
+			log.Error().Err(err).Msg("ClickHouse client close error")
+		}
 	}
 
 	// Close database connection

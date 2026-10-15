@@ -27,13 +27,17 @@ type GRPCServer struct {
 	addr    string
 }
 
-// NewGRPCServer creates a new gRPC server
+// NewGRPCServer creates a new gRPC server with a repository.
 func NewGRPCServer(repo *repository.Repository, addr string) *GRPCServer {
+	return NewGRPCServerWithService(service.NewUsageService(repo), addr)
+}
+
+// NewGRPCServerWithService creates a new gRPC server with an existing usage service.
+func NewGRPCServerWithService(usageService *service.UsageService, addr string) *GRPCServer {
 	srv := grpc.NewServer(
 		grpc.UnaryInterceptor(loggingInterceptor),
 	)
 
-	usageService := service.NewUsageService(repo)
 	grpcServer := &GRPCServer{
 		service: usageService,
 		server:  srv,

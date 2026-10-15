@@ -24,8 +24,11 @@ type HTTPServer struct {
 
 // NewHTTPServer creates a new HTTP server
 func NewHTTPServer(repo *repository.Repository, addr string) *HTTPServer {
-	usageService := service.NewUsageService(repo)
+	return NewHTTPServerWithService(service.NewUsageService(repo), repo, addr)
+}
 
+// NewHTTPServerWithService creates a new HTTP server with an existing usage service.
+func NewHTTPServerWithService(usageService *service.UsageService, repo *repository.Repository, addr string) *HTTPServer {
 	s := &HTTPServer{
 		service: usageService,
 		repo:    repo,
@@ -77,12 +80,24 @@ func (s *HTTPServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	if err := s.repo.Ping(ctx); err != nil {
-		log.Warn().Err(err).Msg("readiness check failed")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"status":"not ready","error":"database unavailable"}`))
-		return
+	if s.repo != nil {
+		if err := s.repo.Ping(ctx); err != nil {
+			log.Warn().Err(err).Msg("readiness check failed: postgres unavailable")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"not ready","error":"database unavailable"}`))
+			return
+		}
+	}
+
+	if s.service != nil && s.service.Analytics() != nil {
+		if err := s.service.Analytics().Ping(ctx); err != nil {
+			log.Warn().Err(err).Msg("readiness check failed: clickhouse unavailable")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"not ready","error":"analytics unavailable"}`))
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
