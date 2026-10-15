@@ -184,7 +184,7 @@ func (w *BatchWriter) sendBatch(ctx context.Context, events []*domain.UsageEvent
 			user_id, project_id, action_id,
 			vendor, model, status, duration_ms,
 			tokens_input, tokens_output, tokens_total,
-			error_class, vendor_http_status, meta
+			error_class, vendor_http_status, meta, cost_nanousd
 		)
 	`)
 	if err != nil {
@@ -231,6 +231,7 @@ func (w *BatchWriter) sendBatch(ctx context.Context, events []*domain.UsageEvent
 			ev.ErrorClass,
 			vendorStatus,
 			meta,
+			ev.CostNanoUSD,
 		)
 		if err != nil {
 			return fmt.Errorf("append event to batch: %w", err)

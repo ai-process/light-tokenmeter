@@ -42,4 +42,5 @@ type SummaryRow struct {
 	TokensTotal   int64
 	RequestCount  int64
 	SumDurationMs int64
+	CostNanoUSD   int64
 }

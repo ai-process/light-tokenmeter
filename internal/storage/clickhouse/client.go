@@ -188,6 +188,7 @@ func (c *Client) QuerySummary(ctx context.Context, params domain.SummaryParams) 
 		"sum(tokens_total) AS tokens_total",
 		"count() AS request_count",
 		"sum(duration_ms) AS sum_duration_ms",
+		"sum(cost_nanousd) AS cost_nanousd",
 	)
 
 	var whereClauses []string
@@ -278,6 +279,7 @@ func (c *Client) QuerySummary(ctx context.Context, params domain.SummaryParams) 
 			&row.TokensTotal,
 			&reqCount,
 			&row.SumDurationMs,
+			&row.CostNanoUSD,
 		)
 
 		if err := rows.Scan(scanTargets...); err != nil {
@@ -331,7 +333,8 @@ func (c *Client) QueryUsageByMeta(ctx context.Context, params domain.MetaUsagePa
 			sum(tokens_input) AS tokens_input,
 			sum(tokens_output) AS tokens_output,
 			sum(tokens_total) AS tokens_total,
-			count() AS request_count
+			count() AS request_count,
+			sum(cost_nanousd) AS cost_nanousd
 		FROM usage_events
 		WHERE %s
 		GROUP BY group_value, vendor, model
@@ -362,6 +365,7 @@ func (c *Client) QueryUsageByMeta(ctx context.Context, params domain.MetaUsagePa
 			&row.TokensOutput,
 			&row.TokensTotal,
 			&reqCount,
+			&row.CostNanoUSD,
 		); err != nil {
 			return nil, false, fmt.Errorf("clickhouse scan meta usage row: %w", err)
 		}

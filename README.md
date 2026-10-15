@@ -130,6 +130,7 @@ An event describes one model call:
 | `error_class` | string | no | Normalised error class. |
 | `vendor_http_status` | int | no | HTTP status returned by the vendor. |
 | `meta` | map of string | no | Your own tags (keep it small), e.g. `{"job_id": "…"}`. |
+| `cost_nanousd` | int ≥0 | no | Call cost in nano-USD (1e-9 USD), priced by the caller; stored as-is and never recomputed. |
 
 Batches (`POST /v1/usage/events:batch`, or `RecordUsageEvents` over gRPC) take up to 500
 events and report how many were created and how many were duplicates:
@@ -171,9 +172,9 @@ curl -s "localhost:8080/v1/usage/summary?$Q&group_by_action_id=true&group_by_sta
 curl -s "localhost:8080/v1/usage/summary?$Q&model=gpt-4o&group_by_user_id=true"
 ```
 
-Each row carries `tokens_input`, `tokens_output`, `tokens_total`, `request_count` and
-`sum_duration_ms`, so you can compute tokens per request, average latency and error share
-yourself. The signals that usually separate greedy from worthy:
+Each row carries `tokens_input`, `tokens_output`, `tokens_total`, `request_count`,
+`sum_duration_ms` and `cost_nanousd` (summed spend; divide by 1e9 for USD), so you can
+compute tokens per request, cost per request, average latency and error share yourself. The signals that usually separate greedy from worthy:
 
 - high `tokens_total / request_count` on a trivial `action_id` (bloated prompts),
 - a large share of tokens spent on `status=error` or `timeout` (paying for failures),
@@ -188,8 +189,8 @@ Responses group by day based on event time (`occurred_at`, falling back to `crea
 ### Usage by your own metadata
 
 If you tag events with a key such as `job_id` in `meta`, the gRPC call `GetUsageByMeta`
-returns everything that job spent, split by vendor and model and optionally by a second
-meta key (say `task_id`), plus an optional `project_id` filter. Lookups on `meta.job_id`
+returns everything that job spent (tokens and `cost_nanousd`), split by vendor and model
+and optionally by a second meta key (say `task_id`), plus an optional `project_id` filter. Lookups on `meta.job_id`
 are indexed via a partial expression index (`meta ? 'job_id'`). Responses include
 `truncated: true` if matching aggregate groups exceed 10,000 rows.
 

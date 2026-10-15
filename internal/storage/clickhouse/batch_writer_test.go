@@ -168,3 +168,27 @@ func TestBatchWriter_ConcurrentEnqueue(t *testing.T) {
 
 	assert.Equal(t, goroutines*perGoroutine, conn.totalRows())
 }
+
+func TestBatchWriter_AppendsCost(t *testing.T) {
+	conn := &mockConn{}
+	writer := NewBatchWriter(conn, 100, time.Hour)
+	writer.Start()
+
+	writer.Enqueue(&domain.UsageEvent{
+		EventID:     uuid.New(),
+		ProjectID:   "p1",
+		UserID:      "u1",
+		Vendor:      "openai",
+		Model:       "gpt-4o",
+		Status:      domain.StatusSuccess,
+		CostNanoUSD: 7_000_000,
+	})
+	require.NoError(t, writer.Close())
+
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	require.Len(t, conn.batches, 1)
+	require.Len(t, conn.batches[0].rows, 1)
+	row := conn.batches[0].rows[0]
+	assert.Equal(t, int64(7_000_000), row[len(row)-1], "cost_nanousd must be the last appended column")
+}

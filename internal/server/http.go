@@ -122,6 +122,7 @@ type recordEventRequest struct {
 	ErrorClass       string            `json:"error_class,omitempty"`
 	VendorHTTPStatus int32             `json:"vendor_http_status,omitempty"`
 	Meta             map[string]string `json:"meta,omitempty"`
+	CostNanoUSD      int64             `json:"cost_nanousd,omitempty"`
 }
 
 type recordEventResponse struct {
@@ -167,6 +168,7 @@ type summaryRow struct {
 	TokensTotal   int64  `json:"tokens_total"`
 	RequestCount  int64  `json:"request_count"`
 	SumDurationMs int64  `json:"sum_duration_ms"`
+	CostNanoUSD   int64  `json:"cost_nanousd"`
 }
 
 type getSummaryResponse struct {
@@ -314,6 +316,7 @@ func (s *HTTPServer) handleGetSummary(w http.ResponseWriter, r *http.Request) {
 			TokensTotal:   row.TokensTotal,
 			RequestCount:  row.RequestCount,
 			SumDurationMs: row.SumDurationMs,
+			CostNanoUSD:   row.CostNanoUSD,
 		})
 	}
 
@@ -339,6 +342,7 @@ func httpRequestToEvent(req *recordEventRequest) (*domain.UsageEvent, error) {
 		VendorHTTPStatus: req.VendorHTTPStatus,
 		Meta:             req.Meta,
 		OccurredAt:       req.OccurredAt,
+		CostNanoUSD:      req.CostNanoUSD,
 	}
 
 	if err := event.EventID.UnmarshalText([]byte(req.EventID)); err != nil {
