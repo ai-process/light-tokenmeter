@@ -17,6 +17,15 @@ type Config struct {
 	DBMaxConns      int32
 	DBMinConns      int32
 
+	// ClickHouse
+	ClickHouseEnabled       bool
+	ClickHouseAddr          string
+	ClickHouseDatabase      string
+	ClickHouseUser          string
+	ClickHousePassword      string
+	ClickHouseBatchSize     int
+	ClickHouseFlushInterval time.Duration
+
 	// Sentry
 	SentryDSN             string
 	SentryEnvironment     string
@@ -29,20 +38,27 @@ type Config struct {
 // Load loads configuration from environment variables
 func Load() *Config {
 	return &Config{
-		DatabaseURL:           getEnv("DATABASE_URL", "postgres://tokenmeter:tokenmeter@localhost:5432/tokenmeter?sslmode=disable"),
-		GRPCAddr:              getEnv("GRPC_ADDR", ":9090"),
-		HTTPAddr:              getEnv("HTTP_ADDR", ":8080"),
-		LogLevel:              getEnv("LOG_LEVEL", "info"),
-		LogFormat:             getEnv("LOG_FORMAT", "json"),
-		ShutdownTimeout:       getDurationEnv("SHUTDOWN_TIMEOUT", 30*time.Second),
-		DBMaxConns:            int32(getIntEnv("DB_MAX_CONNS", 25)),
-		DBMinConns:            int32(getIntEnv("DB_MIN_CONNS", 5)),
-		SentryDSN:             getEnv("SENTRY_DSN", ""),
-		SentryEnvironment:     getEnv("SENTRY_ENVIRONMENT", "development"),
-		SentryRelease:         getEnv("SENTRY_RELEASE", ""),
-		SentryTracing:         getEnv("SENTRY_ENABLE_TRACING", "false") == "true",
-		SentryDebug:           getEnv("SENTRY_DEBUG", "false") == "true",
-		SentryWithBreadcrumbs: getEnv("SENTRY_WITH_BREADCRUMBS", "false") == "true",
+		DatabaseURL:             getEnv("DATABASE_URL", "postgres://tokenmeter:tokenmeter@localhost:5432/tokenmeter?sslmode=disable"),
+		GRPCAddr:                getEnv("GRPC_ADDR", ":9090"),
+		HTTPAddr:                getEnv("HTTP_ADDR", ":8080"),
+		LogLevel:                getEnv("LOG_LEVEL", "info"),
+		LogFormat:               getEnv("LOG_FORMAT", "json"),
+		ShutdownTimeout:         getDurationEnv("SHUTDOWN_TIMEOUT", 30*time.Second),
+		DBMaxConns:              int32(getIntEnv("DB_MAX_CONNS", 25)),
+		DBMinConns:              int32(getIntEnv("DB_MIN_CONNS", 5)),
+		ClickHouseEnabled:       getBoolEnv("CLICKHOUSE_ENABLED", false),
+		ClickHouseAddr:          getEnv("CLICKHOUSE_ADDR", "localhost:9000"),
+		ClickHouseDatabase:      getEnv("CLICKHOUSE_DATABASE", "tokenmeter"),
+		ClickHouseUser:          getEnv("CLICKHOUSE_USER", "default"),
+		ClickHousePassword:      getEnv("CLICKHOUSE_PASSWORD", ""),
+		ClickHouseBatchSize:     getIntEnv("CLICKHOUSE_BATCH_SIZE", 5000),
+		ClickHouseFlushInterval: getDurationEnv("CLICKHOUSE_FLUSH_INTERVAL", 1*time.Second),
+		SentryDSN:               getEnv("SENTRY_DSN", ""),
+		SentryEnvironment:       getEnv("SENTRY_ENVIRONMENT", "development"),
+		SentryRelease:           getEnv("SENTRY_RELEASE", ""),
+		SentryTracing:           getEnv("SENTRY_ENABLE_TRACING", "false") == "true",
+		SentryDebug:             getEnv("SENTRY_DEBUG", "false") == "true",
+		SentryWithBreadcrumbs:   getEnv("SENTRY_WITH_BREADCRUMBS", "false") == "true",
 	}
 }
 
@@ -67,6 +83,13 @@ func getDurationEnv(key string, defaultValue time.Duration) time.Duration {
 		if d, err := time.ParseDuration(value); err == nil {
 			return d
 		}
+	}
+	return defaultValue
+}
+
+func getBoolEnv(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		return value == "true" || value == "1"
 	}
 	return defaultValue
 }

@@ -1,4 +1,4 @@
-# Local stack: light-tokenmeter plus Postgres.
+# Local stack: light-tokenmeter plus Postgres and ClickHouse.
 #
 #   docker compose up --build
 #   curl localhost:8080/readyz
@@ -18,17 +18,45 @@ services:
       timeout: 3s
       retries: 15
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    environment:
+      CLICKHOUSE_DB: tokenmeter
+      CLICKHOUSE_USER: tokenmeter
+      CLICKHOUSE_PASSWORD: tokenmeter
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "9000:9000"
+      - "8123:8123"
+    volumes:
+      - chdata:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8123/ping || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
   light-tokenmeter:
     build: .
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgres://tokenmeter:tokenmeter@db:5432/tokenmeter?sslmode=disable
+      CLICKHOUSE_ENABLED: "true"
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: tokenmeter
+      CLICKHOUSE_USER: tokenmeter
+      CLICKHOUSE_PASSWORD: tokenmeter
+      CLICKHOUSE_BATCH_SIZE: "5000"
+      CLICKHOUSE_FLUSH_INTERVAL: "1s"
     ports:
       - "8080:8080" # HTTP
       - "9090:9090" # gRPC
 
 volumes:
   pgdata:
+  chdata:

@@ -9,14 +9,45 @@ import (
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 )
 
+// AnalyticsReader defines the analytical query capabilities.
+type AnalyticsReader interface {
+	QuerySummary(ctx context.Context, params domain.SummaryParams) ([]domain.SummaryRow, bool, error)
+	QueryUsageByMeta(ctx context.Context, params domain.MetaUsageParams) ([]domain.MetaUsageRow, bool, error)
+	Ping(ctx context.Context) error
+}
+
+// EventSink receives recorded usage events for downstream processing or storage.
+type EventSink interface {
+	Enqueue(events ...*domain.UsageEvent)
+}
+
 // UsageService handles business logic for usage events
 type UsageService struct {
-	repo *repository.Repository
+	repo      *repository.Repository
+	analytics AnalyticsReader
+	sink      EventSink
 }
 
 // NewUsageService creates a new usage service
 func NewUsageService(repo *repository.Repository) *UsageService {
 	return &UsageService{repo: repo}
+}
+
+// WithAnalytics configures an analytical engine (e.g., ClickHouse).
+func (s *UsageService) WithAnalytics(r AnalyticsReader) *UsageService {
+	s.analytics = r
+	return s
+}
+
+// WithEventSink configures an async downstream sink (e.g., ClickHouse BatchWriter).
+func (s *UsageService) WithEventSink(sink EventSink) *UsageService {
+	s.sink = sink
+	return s
+}
+
+// Analytics returns the configured AnalyticsReader, if any.
+func (s *UsageService) Analytics() AnalyticsReader {
+	return s.analytics
 }
 
 // RecordEvent records a single usage event
@@ -27,6 +58,9 @@ func (s *UsageService) RecordEvent(ctx context.Context, event *domain.UsageEvent
 	}
 
 	if created {
+		if s.sink != nil {
+			s.sink.Enqueue(event)
+		}
 		log.Debug().
 			Str("event_id", event.EventID.String()).
 			Str("project_id", event.ProjectID).
@@ -50,6 +84,10 @@ func (s *UsageService) RecordEvents(ctx context.Context, events []*domain.UsageE
 		return 0, 0, err
 	}
 
+	if s.sink != nil && len(events) > 0 {
+		s.sink.Enqueue(events...)
+	}
+
 	log.Debug().
 		Int("created", created).
 		Int("duplicates", duplicates).
@@ -61,6 +99,10 @@ func (s *UsageService) RecordEvents(ctx context.Context, events []*domain.UsageE
 
 // GetSummary returns aggregated usage statistics
 func (s *UsageService) GetSummary(ctx context.Context, params domain.SummaryParams) ([]domain.SummaryRow, bool, error) {
+	if s.analytics != nil {
+		return s.analytics.QuerySummary(ctx, params)
+	}
+
 	rows, truncated, err := s.repo.QuerySummary(ctx, params)
 	if err != nil {
 		return nil, false, err
@@ -79,6 +121,10 @@ func (s *UsageService) GetSummary(ctx context.Context, params domain.SummaryPara
 // GetUsageByMeta returns usage aggregated over events carrying a meta
 // key/value, split by an optional second meta key plus vendor and model.
 func (s *UsageService) GetUsageByMeta(ctx context.Context, params domain.MetaUsageParams) ([]domain.MetaUsageRow, bool, error) {
+	if s.analytics != nil {
+		return s.analytics.QueryUsageByMeta(ctx, params)
+	}
+
 	rows, truncated, err := s.repo.QueryUsageByMeta(ctx, params)
 	if err != nil {
 		return nil, false, err

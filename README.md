@@ -16,6 +16,7 @@ who is worthy.
 - **Flexible reads.** Time-bucketed (per day) summaries with any combination of filters
   and groupings, plus aggregation over your own metadata (e.g. everything one batch job spent).
 - **Two APIs.** HTTP/JSON for curl and dashboards, gRPC for services.
+- **Scalable analytics with ClickHouse.** Optional asynchronous batch buffering and fast analytical aggregations over billions of events with automatic TTL retention.
 
 ## Contents
 
@@ -237,6 +238,13 @@ Environment variables (see [`env.example`](env.example)):
 | `SENTRY_ENABLE_TRACING` | `false` | Sentry performance tracing. |
 | `SENTRY_DEBUG` | `false` | Enable Sentry SDK debug logging. |
 | `SENTRY_WITH_BREADCRUMBS` | `false` | Include breadcrumbs in Sentry error reports. |
+| `CLICKHOUSE_ENABLED` | `false` | Enable ClickHouse for async batch storage and high-scale analytics. |
+| `CLICKHOUSE_ADDR` | `localhost:9000` | ClickHouse native TCP address. |
+| `CLICKHOUSE_DATABASE` | `tokenmeter` | ClickHouse database name. |
+| `CLICKHOUSE_USER` | `default` | ClickHouse user. |
+| `CLICKHOUSE_PASSWORD` | empty | ClickHouse password. |
+| `CLICKHOUSE_BATCH_SIZE` | `5000` | Maximum number of events to buffer before flushing to ClickHouse. |
+| `CLICKHOUSE_FLUSH_INTERVAL` | `1s` | Maximum time to buffer events before flushing to ClickHouse. |
 
 ## Security
 
