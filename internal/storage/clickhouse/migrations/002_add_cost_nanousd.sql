@@ -1,0 +1,1 @@
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS cost_nanousd Int64 DEFAULT 0

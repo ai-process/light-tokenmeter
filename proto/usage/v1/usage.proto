@@ -61,6 +61,10 @@ message UsageEvent {
   
   // Additional metadata as key-value pairs (optional, keep small)
   map<string, string> meta = 15;
+
+  // Cost of the call in nano-USD (1e-9 USD), computed by the caller from its
+  // price catalog at settle time; stored as an immutable fact (optional, >= 0)
+  int64 cost_nanousd = 16;
 }
 
 // RecordUsageEventRequest is the request for recording a single usage event
@@ -133,6 +137,8 @@ message UsageSummaryRow {
   int64 tokens_total = 12;
   int64 request_count = 13;
   int64 sum_duration_ms = 14;
+  // Summed cost in nano-USD (1e-9 USD)
+  int64 cost_nanousd = 15;
 }
 
 // GetUsageSummaryResponse is the response for getting usage summary
@@ -170,6 +176,8 @@ message UsageByMetaRow {
   int64 tokens_output = 5;
   int64 tokens_total = 6;
   int64 request_count = 7;
+  // Summed cost in nano-USD (1e-9 USD)
+  int64 cost_nanousd = 8;
 }
 
 // GetUsageByMetaResponse is the response for meta-scoped aggregation

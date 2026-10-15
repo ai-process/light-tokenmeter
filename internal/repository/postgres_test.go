@@ -227,3 +227,58 @@ func TestQueryUsageByMeta_TruncatedFlag(t *testing.T) {
 	assert.True(t, truncated, "expected truncated to be true when exceeding 10000 rows")
 	assert.Len(t, rows, 10000, "expected exactly 10000 rows when truncated")
 }
+
+func TestCostAggregation(t *testing.T) {
+	pool, repo := getTestPool(t)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
+	require.NoError(t, err)
+
+	newEvent := func(model string, cost int64) *domain.UsageEvent {
+		return &domain.UsageEvent{
+			EventID:      uuid.New(),
+			UserID:       "u1",
+			ProjectID:    "p1",
+			ActionID:     "a1",
+			Vendor:       "openai",
+			Model:        model,
+			Status:       domain.StatusSuccess,
+			TokensInput:  10,
+			TokensOutput: 20,
+			TokensTotal:  30,
+			Meta:         map[string]string{"job_id": "job-cost"},
+			CostNanoUSD:  cost,
+		}
+	}
+
+	_, err = repo.InsertOne(ctx, newEvent("gpt-4o", 1_000_000))
+	require.NoError(t, err)
+	_, _, err = repo.InsertBatch(ctx, []*domain.UsageEvent{
+		newEvent("gpt-4o", 2_000_000),
+		newEvent("gpt-4o-mini", 150_000),
+	})
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	summary, _, err := repo.QuerySummary(ctx, domain.SummaryParams{
+		From:         now.Add(-time.Hour),
+		To:           now.Add(time.Hour),
+		GroupByModel: true,
+	})
+	require.NoError(t, err)
+	byModel := map[string]int64{}
+	for _, r := range summary {
+		byModel[r.Model] += r.CostNanoUSD
+	}
+	assert.Equal(t, int64(3_000_000), byModel["gpt-4o"])
+	assert.Equal(t, int64(150_000), byModel["gpt-4o-mini"])
+
+	metaRows, _, err := repo.QueryUsageByMeta(ctx, domain.MetaUsageParams{MetaKey: "job_id", MetaValue: "job-cost"})
+	require.NoError(t, err)
+	var total int64
+	for _, r := range metaRows {
+		total += r.CostNanoUSD
+	}
+	assert.Equal(t, int64(3_150_000), total)
+}

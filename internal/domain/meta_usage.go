@@ -24,4 +24,5 @@ type MetaUsageRow struct {
 	TokensOutput int64
 	TokensTotal  int64
 	RequestCount int64
+	CostNanoUSD  int64
 }

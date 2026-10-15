@@ -162,6 +162,7 @@ func (s *GRPCServer) GetUsageSummary(ctx context.Context, req *pb.GetUsageSummar
 			TokensTotal:   row.TokensTotal,
 			RequestCount:  row.RequestCount,
 			SumDurationMs: row.SumDurationMs,
+			CostNanousd:   row.CostNanoUSD,
 		})
 	}
 
@@ -200,6 +201,7 @@ func (s *GRPCServer) GetUsageByMeta(ctx context.Context, req *pb.GetUsageByMetaR
 			TokensOutput: row.TokensOutput,
 			TokensTotal:  row.TokensTotal,
 			RequestCount: row.RequestCount,
+			CostNanousd:  row.CostNanoUSD,
 		})
 	}
 	return &pb.GetUsageByMetaResponse{
@@ -224,6 +226,7 @@ func protoToEvent(pbEvent *pb.UsageEvent) (*domain.UsageEvent, error) {
 		ErrorClass:       pbEvent.ErrorClass,
 		VendorHTTPStatus: pbEvent.VendorHttpStatus,
 		Meta:             pbEvent.Meta,
+		CostNanoUSD:      pbEvent.CostNanousd,
 	}
 
 	// Parse event_id

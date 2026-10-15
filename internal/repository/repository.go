@@ -35,12 +35,12 @@ func (r *Repository) InsertOne(ctx context.Context, event *domain.UsageEvent) (b
 			event_id, occurred_at, user_id, project_id, action_id,
 			vendor, model, status, duration_ms,
 			tokens_input, tokens_output, tokens_total,
-			error_class, vendor_http_status, meta
+			error_class, vendor_http_status, meta, cost_nanousd
 		) VALUES (
 			$1, $2, $3, $4, $5,
 			$6, $7, $8, $9,
 			$10, $11, $12,
-			$13, $14, $15
+			$13, $14, $15, $16
 		)
 		ON CONFLICT (event_id) DO NOTHING
 	`
@@ -61,6 +61,7 @@ func (r *Repository) InsertOne(ctx context.Context, event *domain.UsageEvent) (b
 		nullableString(event.ErrorClass),
 		nullableInt32(event.VendorHTTPStatus),
 		metaJSON,
+		event.CostNanoUSD,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert event: %w", err)
@@ -119,6 +120,7 @@ func (r *Repository) InsertBatch(ctx context.Context, events []*domain.UsageEven
 			nullableString(event.ErrorClass),
 			nullableInt32(event.VendorHTTPStatus),
 			metaJSON,
+			event.CostNanoUSD,
 		})
 	}
 
@@ -130,7 +132,7 @@ func (r *Repository) InsertBatch(ctx context.Context, events []*domain.UsageEven
 			"event_id", "occurred_at", "user_id", "project_id", "action_id",
 			"vendor", "model", "status", "duration_ms",
 			"tokens_input", "tokens_output", "tokens_total",
-			"error_class", "vendor_http_status", "meta",
+			"error_class", "vendor_http_status", "meta", "cost_nanousd",
 		},
 		pgx.CopyFromRows(rows),
 	)
@@ -203,6 +205,7 @@ func (r *Repository) QuerySummary(ctx context.Context, params domain.SummaryPara
 		"SUM(tokens_total) AS tokens_total",
 		"COUNT(*) AS request_count",
 		"SUM(duration_ms) AS sum_duration_ms",
+		"SUM(cost_nanousd) AS cost_nanousd",
 	)
 
 	// Build WHERE clause
@@ -301,6 +304,7 @@ func (r *Repository) QuerySummary(ctx context.Context, params domain.SummaryPara
 			&row.TokensTotal,
 			&row.RequestCount,
 			&row.SumDurationMs,
+			&row.CostNanoUSD,
 		)
 
 		if err := rows.Scan(scanDest...); err != nil {
@@ -357,7 +361,8 @@ func (r *Repository) QueryUsageByMeta(ctx context.Context, params domain.MetaUsa
 			SUM(tokens_input) AS tokens_input,
 			SUM(tokens_output) AS tokens_output,
 			SUM(tokens_total) AS tokens_total,
-			COUNT(*) AS request_count
+			COUNT(*) AS request_count,
+			SUM(cost_nanousd) AS cost_nanousd
 		FROM usage_events
 		%s
 		GROUP BY group_value, vendor, model
@@ -377,6 +382,7 @@ func (r *Repository) QueryUsageByMeta(ctx context.Context, params domain.MetaUsa
 		if err := rows.Scan(
 			&row.GroupValue, &row.Vendor, &row.Model,
 			&row.TokensInput, &row.TokensOutput, &row.TokensTotal, &row.RequestCount,
+			&row.CostNanoUSD,
 		); err != nil {
 			return nil, false, fmt.Errorf("scan meta usage row: %w", err)
 		}

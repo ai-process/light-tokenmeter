@@ -188,6 +188,34 @@ func TestValidateEvent(t *testing.T) {
 			},
 			wantErr: domain.ErrModelTooLong,
 		},
+		{
+			name: "negative cost",
+			event: domain.UsageEvent{
+				EventID:     uuid.New(),
+				UserID:      "user-123",
+				ProjectID:   "project-456",
+				ActionID:    "action-789",
+				Vendor:      "openai",
+				Model:       "gpt-4o",
+				Status:      domain.StatusSuccess,
+				CostNanoUSD: -1,
+			},
+			wantErr: domain.ErrNegativeCost,
+		},
+		{
+			name: "valid event with cost",
+			event: domain.UsageEvent{
+				EventID:     uuid.New(),
+				UserID:      "user-123",
+				ProjectID:   "project-456",
+				ActionID:    "action-789",
+				Vendor:      "openai",
+				Model:       "gpt-4o",
+				Status:      domain.StatusSuccess,
+				CostNanoUSD: 12_500_000,
+			},
+			wantErr: nil,
+		},
 	}
 
 	for _, tt := range tests {

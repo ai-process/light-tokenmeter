@@ -68,6 +68,7 @@ type UsageEvent struct {
 	ErrorClass       string
 	VendorHTTPStatus int32
 	Meta             map[string]string
+	CostNanoUSD      int64
 }
 
 // Validation errors
@@ -85,6 +86,7 @@ var (
 	ErrVendorTooLong    = errors.New("vendor exceeds 64 characters")
 	ErrModelTooLong     = errors.New("model exceeds 128 characters")
 	ErrTokensMismatch   = errors.New("tokens_total must equal tokens_input + tokens_output")
+	ErrNegativeCost     = errors.New("cost_nanousd must not be negative")
 	ErrBatchTooLarge    = errors.New("batch size exceeds maximum of 500 events")
 )
 
@@ -132,6 +134,9 @@ func (e *UsageEvent) Validate() error {
 	}
 	if e.Status == StatusUnspecified {
 		return ErrInvalidStatus
+	}
+	if e.CostNanoUSD < 0 {
+		return ErrNegativeCost
 	}
 
 	// Validate or compute tokens_total
