@@ -10,6 +10,6 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /out/light-tokenmeter /light-tokenmeter
-USER nonroot:nonroot
+USER 65532:65532
 EXPOSE 8080 9090
 ENTRYPOINT ["/light-tokenmeter"]

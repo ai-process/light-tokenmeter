@@ -10,7 +10,7 @@ are they worth it?** Your apps (or a gateway such as
 query totals by project, user, action, vendor, model or status and see who is greedy and
 who is worthy.
 
-- One static Go binary, one Postgres table, a distroless image of ~25 MB (zero package manager, zero CVEs). No queue, no cache, no UI.
+- One static Go binary, one Postgres table, a distroless image of ~25 MB (no shell or package manager, minimal attack surface). No queue, no cache, no UI.
 - **Append-only and idempotent.** Every event has a UUID; sending it twice is harmless.
 - **Fast writes.** Batches of up to 500 events are inserted with a single `COPY`.
 - **Flexible reads.** Time-bucketed (per day) summaries with any combination of filters
