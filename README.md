@@ -59,18 +59,18 @@ The schema is created automatically on startup.
 
 ## Resource footprint
 
-Compiled as a static Go binary in a distroless container (`nonroot:65532`), `light-tokenmeter` provides high-throughput token and cost accounting with minimal memory, disk, and startup overhead compared to Python-based sinks.
+Approximate resource usage of the distroless image compared with a typical Python-based usage accounting service in a synthetic test:
 
-| Metric | `light-tokenmeter` (Go) | Typical Python Sink | Difference |
+| Metric | `light-tokenmeter` (Go) | Typical Python sink (e.g. FastAPI/Celery) | Difference |
 |---|---|---|---|
 | Docker image size (uncompressed) | ~25–26 MB (distroless) | ~800 MB–2.2 GB | ~97% smaller disk footprint |
-| Idle memory (cgroup memory.current) | ~18–25 MiB | ~300–500 MiB | ~15–20x less idle memory |
-| Active load memory (1k RPS) | ~35–50 MiB | ~800 MiB–1.5 GiB | ~20–30x less memory under load |
-| Time to readiness (`/readyz` 200) | ~20–40 ms | 5–15 s | ~150–350x faster readiness |
-| Concurrency model | Native goroutines in 1 process | Multiple OS processes + asyncio | Single process uses all cores; no per-worker memory duplication |
-| Recommended container memory limit | 128–256 MiB | ≥1.5–2 GiB | ~8–12x lower memory reservation |
+| Idle memory (cgroup `memory.current`) | ~18–25 MiB | ~300–500 MiB | ~12–28× less idle memory |
+| Active load memory (1k RPS) | ~35–50 MiB | ~800 MiB–1.5 GiB | ~16–44× less memory under load |
+| Time to readiness (`/readyz` 200) | ~20–40 ms | 5–15 s | ~125–750× faster readiness |
+| Concurrency model | Native goroutines | Multiple OS processes + asyncio | No per-worker memory duplication |
+| Recommended container memory limit | 128–256 MiB | ≥1.5–2 GiB | ~6–16× lower memory reservation |
 
-*Measurements from synthetic k6 benchmarks (October 2026, 1,000 RPS against a 10 ms mock upstream) on Linux x86_64, 4 vCPU, 8 GB RAM; readiness assumes warm DB with schema applied.*
+*Measurements from synthetic k6 benchmarks (October 2026, 1,000 RPS ingesting events via `POST /v1/usage/events` to local PostgreSQL) on Linux x86_64, 4 vCPU, 8 GiB RAM; readiness assumes warm DB with schema applied.*
 
 ## Installation
 
