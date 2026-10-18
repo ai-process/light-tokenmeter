@@ -6,7 +6,7 @@
 
 A very small service that answers one question: **who is spending your LLM tokens, and
 are they worth it?** Your apps (or a gateway such as
-[llm-proxy](https://github.com/ai-process/llm-proxy)) push one event per model call; you
+[KTMS](https://github.com/ai-process/ktms)) push one event per model call; you
 query totals by project, user, action, vendor, model or status and see who is greedy and
 who is worthy.
 
