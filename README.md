@@ -10,13 +10,13 @@ are they worth it?** Your apps (or a gateway such as
 query totals by project, user, action, vendor, model or status and see who is greedy and
 who is worthy.
 
-- One static Go binary, one Postgres table, a distroless image of ~25 MB (no shell or package manager, minimal attack surface). No queue, no cache, no UI.
+- One static Go binary, one Postgres table, a small image (see [Resource footprint](#resource-footprint)). No queue, no cache, no UI.
 - **Append-only and idempotent.** Every event has a UUID; sending it twice is harmless.
 - **Fast writes.** Batches of up to 500 events are inserted with a single `COPY`.
 - **Flexible reads.** Time-bucketed (per day) summaries with any combination of filters
   and groupings, plus aggregation over your own metadata (e.g. everything one batch job spent).
 - **Two APIs.** HTTP/JSON for curl and dashboards, gRPC for services.
-- **Scalable analytics with ClickHouse.** Optional asynchronous batch buffering and fast analytical aggregations over billions of events with automatic TTL retention.
+- **Scalable analytics with ClickHouse.** Optional asynchronous batch buffering and analytical aggregations over large event volumes with automatic TTL retention.
 
 ## Contents
 
@@ -59,18 +59,10 @@ The schema is created automatically on startup.
 
 ## Resource footprint
 
-Resource usage of the distroless image compared with estimated baselines for a typical Python-based service (FastAPI + Uvicorn, 4 workers):
-
-| Metric | `light-tokenmeter` (Go) | Estimated Python baseline (FastAPI + Uvicorn) | Difference |
-|---|---|---|---|
-| Docker image size (uncompressed) | ~25–26 MB (distroless) | ~800 MB–2.2 GB | ~97–99% smaller disk footprint |
-| Idle memory (cgroup `memory.current`) | ~18–25 MiB | ~300–500 MiB | ~12–28× less idle memory |
-| Active load memory (1k RPS) | ~35–50 MiB | ~800 MiB–1.5 GiB | ~16–44× less memory under load |
-| Time to readiness (`/readyz` 200) | ~20–40 ms | 5–15 s | ~125–750× faster readiness |
-| Concurrency model | Native goroutines | Multiple OS processes + asyncio | No per-worker memory duplication |
-| Recommended container memory limit | 128–256 MiB | ≥1.5–2 GiB | ~6–16× lower memory reservation |
-
-*Go metrics observed under synthetic k6 load (October 2026, 1,000 RPS ingesting single events via `POST /v1/usage/events` to local PostgreSQL, `CLICKHOUSE_ENABLED=false`, `DB_MAX_CONNS=25`) on Linux x86_64, 4 vCPU, 8 GiB RAM; readiness assumes warm DB with schema applied. Python metrics represent typical multi-worker runtime estimates.*
+The published image `coyl/light-tokenmeter:0.1.1` (`latest`) is ~28 MB uncompressed and ~11 MB to
+download for linux/amd64 (Docker Hub manifest and `docker image inspect`). That image is Alpine-based;
+the distroless runtime in the current [`Dockerfile`](Dockerfile) is not released yet. Memory,
+readiness and throughput have not been measured.
 
 ## Installation
 
