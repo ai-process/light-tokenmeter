@@ -68,7 +68,7 @@ func TestExplainJobIdIndex(t *testing.T) {
 			Meta:         map[string]string{"job_id": fmt.Sprintf("job-%d", i%10)},
 		})
 	}
-	_, _, err = repo.InsertBatch(ctx, events)
+	_, err = repo.InsertBatch(ctx, events)
 	require.NoError(t, err)
 
 	_, err = pool.Exec(ctx, "VACUUM ANALYZE usage_events;")
@@ -254,7 +254,7 @@ func TestCostAggregation(t *testing.T) {
 
 	_, err = repo.InsertOne(ctx, newEvent("gpt-4o", 1_000_000))
 	require.NoError(t, err)
-	_, _, err = repo.InsertBatch(ctx, []*domain.UsageEvent{
+	_, err = repo.InsertBatch(ctx, []*domain.UsageEvent{
 		newEvent("gpt-4o", 2_000_000),
 		newEvent("gpt-4o-mini", 150_000),
 	})
@@ -281,4 +281,32 @@ func TestCostAggregation(t *testing.T) {
 		total += r.CostNanoUSD
 	}
 	assert.Equal(t, int64(3_150_000), total)
+}
+
+// A retried batch inserts nothing new, and InsertBatch says so by ID, so the
+// caller can keep duplicates out of downstream sinks.
+func TestInsertBatchReturnsOnlyNewIDs(t *testing.T) {
+	pool, repo := getTestPool(t)
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
+	require.NoError(t, err)
+
+	now := time.Now()
+	mk := func() *domain.UsageEvent {
+		return &domain.UsageEvent{
+			EventID: uuid.New(), OccurredAt: &now, UserID: "u", ProjectID: "p", ActionID: "a",
+			Vendor: "openai", Model: "m", Status: domain.StatusSuccess, TokensInput: 1, TokensOutput: 1, TokensTotal: 2,
+		}
+	}
+	first := []*domain.UsageEvent{mk(), mk()}
+	created, err := repo.InsertBatch(ctx, first)
+	require.NoError(t, err)
+	require.Len(t, created, 2)
+
+	retry := append(first, mk())
+	created, err = repo.InsertBatch(ctx, retry)
+	require.NoError(t, err)
+	require.Len(t, created, 1)
+	_, ok := created[retry[2].EventID]
+	require.True(t, ok, "only the new event is reported as created")
 }

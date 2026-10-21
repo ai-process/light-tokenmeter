@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
@@ -72,15 +73,17 @@ func (r *Repository) InsertOne(ctx context.Context, event *domain.UsageEvent) (b
 
 // InsertBatch inserts multiple usage events efficiently using COPY protocol
 // Returns the count of newly created events and duplicate events
-func (r *Repository) InsertBatch(ctx context.Context, events []*domain.UsageEvent) (created, duplicates int, err error) {
+// It returns the IDs actually inserted: duplicates of stored events are not, so
+// downstream sinks fed from them see each event once, however often it is sent.
+func (r *Repository) InsertBatch(ctx context.Context, events []*domain.UsageEvent) (created map[uuid.UUID]struct{}, err error) {
 	if len(events) == 0 {
-		return 0, 0, nil
+		return nil, nil
 	}
 
 	// Use a transaction with temporary table approach for idempotent batch insert
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return 0, 0, fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -93,7 +96,7 @@ func (r *Repository) InsertBatch(ctx context.Context, events []*domain.UsageEven
 		CREATE TEMP TABLE temp_usage_events (LIKE usage_events INCLUDING DEFAULTS) ON COMMIT DROP
 	`)
 	if err != nil {
-		return 0, 0, fmt.Errorf("create temp table: %w", err)
+		return nil, fmt.Errorf("create temp table: %w", err)
 	}
 
 	// Prepare rows for COPY
@@ -101,7 +104,7 @@ func (r *Repository) InsertBatch(ctx context.Context, events []*domain.UsageEven
 	for _, event := range events {
 		metaJSON, err := event.MetaJSON()
 		if err != nil {
-			return 0, 0, fmt.Errorf("marshal meta for event %s: %w", event.EventID, err)
+			return nil, fmt.Errorf("marshal meta for event %s: %w", event.EventID, err)
 		}
 
 		rows = append(rows, []interface{}{
@@ -137,29 +140,35 @@ func (r *Repository) InsertBatch(ctx context.Context, events []*domain.UsageEven
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
-		return 0, 0, fmt.Errorf("copy to temp table: %w", err)
+		return nil, fmt.Errorf("copy to temp table: %w", err)
 	}
 
 	log.Debug().Int64("copied", copyCount).Msg("copied events to temp table")
 
 	// Insert from temp to main table with ON CONFLICT DO NOTHING
-	tag, err := tx.Exec(ctx, `
+	inserted, err := tx.Query(ctx, `
 		INSERT INTO usage_events
 		SELECT * FROM temp_usage_events
 		ON CONFLICT (event_id) DO NOTHING
+		RETURNING event_id
 	`)
 	if err != nil {
-		return 0, 0, fmt.Errorf("insert from temp: %w", err)
+		return nil, fmt.Errorf("insert from temp: %w", err)
+	}
+	ids, err := pgx.CollectRows(inserted, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return nil, fmt.Errorf("insert from temp: %w", err)
 	}
 
 	if err = tx.Commit(ctx); err != nil {
-		return 0, 0, fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
 
-	created = int(tag.RowsAffected())
-	duplicates = len(events) - created
-
-	return created, duplicates, nil
+	created = make(map[uuid.UUID]struct{}, len(ids))
+	for _, id := range ids {
+		created[id] = struct{}{}
+	}
+	return created, nil
 }
 
 // QuerySummary returns aggregated usage statistics
