@@ -79,13 +79,23 @@ func (s *UsageService) RecordEvent(ctx context.Context, event *domain.UsageEvent
 
 // RecordEvents records multiple usage events in a batch
 func (s *UsageService) RecordEvents(ctx context.Context, events []*domain.UsageEvent) (created, duplicates int, err error) {
-	created, duplicates, err = s.repo.InsertBatch(ctx, events)
+	inserted, err := s.repo.InsertBatch(ctx, events)
 	if err != nil {
 		return 0, 0, err
 	}
+	created, duplicates = len(inserted), len(events)-len(inserted)
 
-	if s.sink != nil && len(events) > 0 {
-		s.sink.Enqueue(events...)
+	// Only new events reach the sink, as on the single-event path: a retried
+	// batch must not count twice in analytics (ClickHouse does not deduplicate).
+	if s.sink != nil && created > 0 {
+		fresh := make([]*domain.UsageEvent, 0, created)
+		for _, e := range events {
+			if _, ok := inserted[e.EventID]; ok {
+				fresh = append(fresh, e)
+				delete(inserted, e.EventID) // an ID repeated within the batch goes out once
+			}
+		}
+		s.sink.Enqueue(fresh...)
 	}
 
 	log.Debug().
