@@ -1,7 +1,6 @@
 #!/bin/sh
-# Proves the upgrade promise in README "Versions and upgrades": a database
-# (Postgres and ClickHouse) of an older release keeps working under this
-# build, and under the old release again (rolling upgrade).
+# Proves README "Versions and upgrades": an older release's Postgres and
+# ClickHouse keep working under this build, and under the old release again.
 # Env: PREV (tags to upgrade from), CUR (tag being released), NEW_IMAGE.
 set -eu
 
@@ -34,9 +33,13 @@ pick_prev() {
 	done
 }
 # The oldest release of the same major: "one step from any earlier release"
-# is promised within a major only.
-pick_oldest_same_major() {
+# is promised within a major. The first release of a major (1.0.0) is
+# instead tested from the oldest release of the major before it.
+pick_oldest() {
 	major=$(echo "${CUR:-$1}" | sed -E 's/^v?([0-9]+)\..*/\1/')
+	if ! stable_tags | grep -qE "^v?$major\."; then
+		major=$(echo "$1" | sed -E 's/^v?([0-9]+)\..*/\1/')
+	fi
 	for t in $(stable_tags | grep -E "^v?$major\." | sed 's/^v//' | sort -t. -k2,2n -k3,3n); do
 		for tag in "v$t" "$t"; do
 			if git rev-parse -q --verify "refs/tags/$tag" >/dev/null && has_image "$tag"; then
@@ -49,7 +52,7 @@ pick_oldest_same_major() {
 
 if [ -z "${PREV:-}" ]; then
 	prev=$(pick_prev)
-	oldest=$([ -n "$prev" ] && pick_oldest_same_major "$prev" || true)
+	oldest=$([ -n "$prev" ] && pick_oldest "$prev" || true)
 	PREV=$prev
 	[ -n "$oldest" ] && [ "$oldest" != "$prev" ] && PREV="$prev $oldest"
 fi
@@ -74,6 +77,7 @@ cleanup() {
 	rm -f "$STATE"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 wait_ready() {
 	http=$(docker port "$1" 8080/tcp | head -n 1)
@@ -119,7 +123,8 @@ for from in $PREV; do
 		-e POSTGRES_USER=tokenmeter -e POSTGRES_PASSWORD=tokenmeter -e POSTGRES_DB=tokenmeter postgres:17-alpine >/dev/null
 	docker run -d --name "$P-ch" --network "$NET" -e CLICKHOUSE_USER=tokenmeter -e CLICKHOUSE_PASSWORD=tokenmeter \
 		-e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 clickhouse/clickhouse-server:24.3-alpine >/dev/null
-	until docker exec "$P-pg" pg_isready -U tokenmeter -d tokenmeter >/dev/null 2>&1; do sleep 1; done
+	# Over TCP: the socket answers while the image's init server still runs.
+	until docker exec "$P-pg" pg_isready -h 127.0.0.1 -U tokenmeter -d tokenmeter >/dev/null 2>&1; do sleep 1; done
 	until docker exec "$P-ch" wget -q --spider http://127.0.0.1:8123/ping >/dev/null 2>&1; do sleep 1; done
 
 	old="coyl/light-tokenmeter:${from#v}"

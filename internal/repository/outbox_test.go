@@ -239,3 +239,27 @@ func TestBackfillOutboxSkipsAFedClickHouse(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, n, "the decision is made once")
 }
+
+func TestBackfillPendingUntilCopied(t *testing.T) {
+	_, repo := getTestPool(t)
+	ctx := context.Background()
+	fill(t, repo, 2)
+	repo.WithOutbox()
+	pending, err := repo.BackfillPending(ctx)
+	require.NoError(t, err)
+	require.False(t, pending, "no backfill yet")
+
+	_, err = repo.BackfillOutbox(ctx, func(context.Context) (bool, error) { return true, nil })
+	require.NoError(t, err)
+	fill(t, repo, 1) // recorded after the backfill: not part of it
+	pending, err = repo.BackfillPending(ctx)
+	require.NoError(t, err)
+	require.True(t, pending)
+
+	b, _, err := repo.ClaimOutbox(ctx, owner, 10, time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, repo.AckOutbox(ctx, b.ID))
+	pending, err = repo.BackfillPending(ctx)
+	require.NoError(t, err)
+	require.False(t, pending)
+}

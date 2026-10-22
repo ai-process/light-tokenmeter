@@ -270,10 +270,12 @@ the `internal/` Go packages, the outbox's lease and retry timings, and resource 
   checks the totals.
 - **Rolling upgrades work within 1.x:** migrations only add, so replicas of the previous release
   keep serving on the migrated databases while new ones start; the upgrade test runs the old
-  release again after the new one migrated. A change that cannot be additive waits for 2.0.
+  release again, on its own, after the new one migrated. A change that cannot be additive waits
+  for 2.0.
 - **Downgrades are not supported.** To go back, restore the Postgres backup taken before the
   upgrade (ClickHouse can be rebuilt from it, see [ClickHouse](#clickhouse)).
-- **From 0.x**, upgrade straight to 1.0; the upgrade test covers 0.1.0 and 0.1.2.
+- **From 0.x**, upgrade straight to 1.0; its release is tested from 0.1.0 and 0.1.2. Later
+  releases are tested from 1.x ones only.
 
 Nothing is experimental in 1.0. KTMS keeps a copy of `usage.proto` for its usage reports; its CI
 fails when the copy differs from this repository's.
@@ -403,7 +405,9 @@ the service records to Postgres and logs the error. Set `CLICKHOUSE_ENABLED` the
 replica: an event written by a replica with it off is never queued for ClickHouse.
 
 The first time ClickHouse is turned on for a database, and its `usage_events` is still empty, the
-whole Postgres history is queued for it, so reports start complete. Events recorded while it
+last 90 days of Postgres history (what ClickHouse's TTL keeps) are queued for it, and reports
+stay on Postgres until that history is copied. Turn ClickHouse on after an upgrade from 0.x, not
+during the roll: old replicas would write to it directly and could be counted twice. Events recorded while it
 was off later on are not copied; Postgres reports still include them. Versions before 1.0 kept
 events in memory and could drop them; to rebuild ClickHouse from Postgres, empty its
 `usage_events` table and run

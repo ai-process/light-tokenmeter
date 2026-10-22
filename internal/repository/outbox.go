@@ -237,9 +237,9 @@ func decodeMeta(raw []byte) map[string]string {
 	return out
 }
 
-// BackfillOutbox queues every stored event for ClickHouse, once per database,
-// when chEmpty says ClickHouse has none: history recorded before ClickHouse
-// was turned on would otherwise be missing from its reports.
+// BackfillOutbox queues the stored events ClickHouse keeps (its 90-day TTL),
+// once per database, when chEmpty says ClickHouse has none: history recorded
+// before ClickHouse was turned on would otherwise be missing from its reports.
 func (r *Repository) BackfillOutbox(ctx context.Context, chEmpty func(context.Context) (bool, error)) (int64, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -263,9 +263,15 @@ func (r *Repository) BackfillOutbox(ctx context.Context, chEmpty func(context.Co
 	}
 	var queued int64
 	if empty {
+		// One-time and possibly large: a statement_timeout in DATABASE_URL
+		// would roll it back and repeat it at every retry.
+		if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = 0`); err != nil {
+			return 0, fmt.Errorf("backfill outbox: %w", err)
+		}
 		tag, err := tx.Exec(ctx, `
-			INSERT INTO clickhouse_outbox (event_id, enqueued_at)
-			SELECT event_id, created_at FROM usage_events
+			INSERT INTO clickhouse_outbox (event_id)
+			SELECT event_id FROM usage_events
+			WHERE COALESCE(occurred_at, created_at) > now() - interval '90 days'
 			ON CONFLICT (event_id) DO NOTHING`)
 		if err != nil {
 			return 0, fmt.Errorf("backfill outbox: %w", err)
@@ -279,4 +285,18 @@ func (r *Repository) BackfillOutbox(ctx context.Context, chEmpty func(context.Co
 		return 0, fmt.Errorf("backfill outbox: %w", err)
 	}
 	return queued, nil
+}
+
+// BackfillPending reports whether history queued by BackfillOutbox still waits
+// for ClickHouse; until it is copied, reports must come from Postgres.
+func (r *Repository) BackfillPending(ctx context.Context) (bool, error) {
+	var pending bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM clickhouse_outbox o, clickhouse_backfill b
+			WHERE b.queued > 0 AND o.enqueued_at <= b.done_at)`).Scan(&pending)
+	if err != nil {
+		return false, fmt.Errorf("backfill pending: %w", err)
+	}
+	return pending, nil
 }

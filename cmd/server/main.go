@@ -190,6 +190,21 @@ func startClickHouse(parent context.Context, cfg *config.Config, repo *repositor
 				st.client = client
 				st.repl = clickhouse.NewReplicator(repo, client.Conn(), cfg.ClickHouseBatchSize, cfg.ClickHouseFlushInterval)
 				st.repl.Start()
+				// Reports switch to ClickHouse only once it holds the backfilled history.
+				for {
+					pending, err := repo.BackfillPending(ctx)
+					if err == nil && !pending {
+						break
+					}
+					if err != nil {
+						log.Warn().Err(err).Msg("cannot check the ClickHouse backfill")
+					}
+					select {
+					case <-time.After(5 * time.Second):
+					case <-ctx.Done():
+						return
+					}
+				}
 				svc.WithAnalytics(client)
 				log.Info().Msg("ClickHouse ready: copying events and serving reports from it")
 				return
