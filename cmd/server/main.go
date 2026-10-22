@@ -174,7 +174,15 @@ func startClickHouse(parent context.Context, cfg *config.Config, repo *repositor
 				Password: cfg.ClickHousePassword,
 			})
 			if err == nil {
-				if err = client.EnsureSchema(ctx); err != nil {
+				err = client.EnsureSchema(ctx)
+				var queued int64
+				if err == nil {
+					queued, err = repo.BackfillOutbox(ctx, client.Empty)
+				}
+				if queued > 0 {
+					log.Info().Int64("events", queued).Msg("ClickHouse is empty: queued the Postgres history for it")
+				}
+				if err != nil {
 					_ = client.Close()
 				}
 			}
@@ -182,6 +190,21 @@ func startClickHouse(parent context.Context, cfg *config.Config, repo *repositor
 				st.client = client
 				st.repl = clickhouse.NewReplicator(repo, client.Conn(), cfg.ClickHouseBatchSize, cfg.ClickHouseFlushInterval)
 				st.repl.Start()
+				// Reports switch to ClickHouse only once it holds the backfilled history.
+				for {
+					pending, err := repo.BackfillPending(ctx)
+					if err == nil && !pending {
+						break
+					}
+					if err != nil {
+						log.Warn().Err(err).Msg("cannot check the ClickHouse backfill")
+					}
+					select {
+					case <-time.After(5 * time.Second):
+					case <-ctx.Done():
+						return
+					}
+				}
 				svc.WithAnalytics(client)
 				log.Info().Msg("ClickHouse ready: copying events and serving reports from it")
 				return

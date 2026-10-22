@@ -261,6 +261,22 @@ releases fix bugs.
 Not public, and free to change in any release: log message text (other than the prefix above),
 the `internal/` Go packages, the outbox's lease and retry timings, and resource numbers.
 
+### Versions and upgrades
+
+- **Within 1.x, upgrade in one step** from any earlier 1.x release: Postgres and ClickHouse
+  migrations run forward at startup and cover every release in between.
+  `scripts/upgrade-test.sh` upgrades from the previous release and from the oldest release of the
+  same major on every pull request and before an image is published, with both databases, and
+  checks the totals.
+- **Rolling upgrades work within 1.x:** migrations only add, so replicas of the previous release
+  keep serving on the migrated databases while new ones start; the upgrade test runs the old
+  release again, on its own, after the new one migrated. A change that cannot be additive waits
+  for 2.0.
+- **Downgrades are not supported.** To go back, restore the Postgres backup taken before the
+  upgrade (ClickHouse can be rebuilt from it, see [ClickHouse](#clickhouse)).
+- **From 0.x**, upgrade straight to 1.0; its release is tested from 0.1.0 and 0.1.2. Later
+  releases are tested from 1.x ones only.
+
 Nothing is experimental in 1.0. KTMS keeps a copy of `usage.proto` for its usage reports; its CI
 fails when the copy differs from this repository's.
 
@@ -350,7 +366,7 @@ and `meta`; avoid personal data you would not want in a database.
 ## Operations
 
 - **Migrations** run at startup and are embedded in the binary.
-- **Upgrades**: deploy a newer image tag.
+- **Upgrades**: deploy a newer image tag; see [Versions and upgrades](#versions-and-upgrades).
 - **Backups**: Postgres holds everything (ClickHouse can be rebuilt from it); back it up like any other.
 - **Logs**: structured JSON on stdout.
 
@@ -388,9 +404,13 @@ Migrations need a ClickHouse user allowed to create and alter `usage_events`; un
 the service records to Postgres and logs the error. Set `CLICKHOUSE_ENABLED` the same on every
 replica: an event written by a replica with it off is never queued for ClickHouse.
 
-Events recorded before ClickHouse was turned on, or while it was off, are not copied; Postgres
-reports still include them. Versions before 1.0 kept events in memory and could drop them; to rebuild ClickHouse from
-Postgres, empty its `usage_events` table and run
+The first time ClickHouse is turned on for a database, and its `usage_events` is still empty, the
+last 90 days of Postgres history (what ClickHouse's TTL keeps) are queued for it, and reports
+stay on Postgres until that history is copied. Turn ClickHouse on after an upgrade from 0.x, not
+during the roll: old replicas would write to it directly and could be counted twice. Events recorded while it
+was off later on are not copied; Postgres reports still include them. Versions before 1.0 kept
+events in memory and could drop them; to rebuild ClickHouse from Postgres, empty its
+`usage_events` table and run
 `INSERT INTO clickhouse_outbox (event_id) SELECT event_id FROM usage_events ON CONFLICT DO NOTHING`
 in Postgres.
 
@@ -422,8 +442,9 @@ Layout: `cmd/server` (entrypoint), `internal/server` (HTTP + gRPC), `internal/se
 ### Releasing
 
 Pushing a git tag publishes a multi-arch image to Docker Hub as `coyl/light-tokenmeter:<tag>`
-(and `latest` for semver tags). The repository needs the secrets `DOCKER_USERNAME` and
-`DOCKER_PASSWORD`.
+(and `latest` for semver tags), once the upgrade test from earlier releases passes. The repository
+needs the secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD`. Run the upgrade test locally (needs
+Docker) with `./scripts/upgrade-test.sh`.
 
 ```bash
 git tag 0.1.0 && git push origin 0.1.0

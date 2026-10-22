@@ -407,6 +407,15 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
+// Empty reports whether usage_events holds no event yet.
+func (c *Client) Empty(ctx context.Context) (bool, error) {
+	var n uint64
+	if err := c.conn.QueryRow(ctx, "SELECT count() FROM (SELECT 1 FROM usage_events LIMIT 1)").Scan(&n); err != nil {
+		return false, fmt.Errorf("check clickhouse events: %w", err)
+	}
+	return n == 0, nil
+}
+
 // Conn returns the driver connection.
 func (c *Client) Conn() driver.Conn {
 	return c.conn
