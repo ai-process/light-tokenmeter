@@ -6,10 +6,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ai-process/light-tokenmeter/internal/domain"
+	"github.com/ai-process/light-tokenmeter/internal/metrics"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 	"github.com/ai-process/light-tokenmeter/internal/testdb"
 )
@@ -86,6 +88,8 @@ func TestRecordEventsQueuesOnlyNewEventsForClickHouse(t *testing.T) {
 	pool := testdb.Postgres(t)
 
 	svc := NewUsageService(repository.New(pool).WithOutbox())
+	created0 := testutil.ToFloat64(metrics.Events.WithLabelValues("created"))
+	dups0 := testutil.ToFloat64(metrics.Events.WithLabelValues("duplicate"))
 	ev := &domain.UsageEvent{
 		EventID: uuid.New(), OccurredAt: ptrTime(time.Now()), UserID: "u", ProjectID: "p", ActionID: "a",
 		Vendor: "openai", Model: "m", Status: domain.StatusSuccess, TokensInput: 1, TokensOutput: 1, TokensTotal: 2,
@@ -103,6 +107,8 @@ func TestRecordEventsQueuesOnlyNewEventsForClickHouse(t *testing.T) {
 	var queued int
 	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM clickhouse_outbox").Scan(&queued))
 	require.Equal(t, 1, queued, "the outbox must hold the event once")
+	assert.Equal(t, created0+1, testutil.ToFloat64(metrics.Events.WithLabelValues("created")))
+	assert.Equal(t, dups0+3, testutil.ToFloat64(metrics.Events.WithLabelValues("duplicate")))
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }

@@ -17,11 +17,15 @@ import (
 	"github.com/ai-process/light-tokenmeter/internal/config"
 	"github.com/ai-process/light-tokenmeter/internal/database"
 	"github.com/ai-process/light-tokenmeter/internal/logger"
+	"github.com/ai-process/light-tokenmeter/internal/metrics"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 	"github.com/ai-process/light-tokenmeter/internal/server"
 	"github.com/ai-process/light-tokenmeter/internal/service"
 	"github.com/ai-process/light-tokenmeter/internal/storage/clickhouse"
 )
+
+// version is set at build time (-ldflags "-X main.version=…").
+var version = "dev"
 
 func main() {
 	// Load .env file if present
@@ -38,6 +42,7 @@ func main() {
 	log.Info().
 		Str("grpc_addr", cfg.GRPCAddr).
 		Str("http_addr", cfg.HTTPAddr).
+		Str("version", version).
 		Str("log_level", cfg.LogLevel).
 		Msg("starting light-tokenmeter service")
 
@@ -88,6 +93,15 @@ func main() {
 		repo.WithOutbox()
 		usageSvc.ExpectAnalytics()
 		ch = startClickHouse(ctx, cfg, repo, usageSvc)
+	}
+
+	metrics.BuildInfo.WithLabelValues(version).Set(1)
+	if err := metrics.Serve(ctx, cfg.MetricsAddr); err != nil {
+		log.Fatal().Err(err).Str("addr", cfg.MetricsAddr).Msg("failed to start the metrics server")
+	}
+	if cfg.ClickHouseEnabled {
+		metrics.ClickHouseEnabled.Set(1)
+		go metrics.WatchOutbox(ctx, repo.OutboxBacklog, 15*time.Second)
 	}
 
 	// Create servers

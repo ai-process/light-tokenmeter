@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/ai-process/light-tokenmeter/internal/auth"
 	"github.com/ai-process/light-tokenmeter/internal/domain"
+	"github.com/ai-process/light-tokenmeter/internal/metrics"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 	"github.com/ai-process/light-tokenmeter/internal/service"
 
@@ -49,7 +51,7 @@ func NewGRPCServerWithService(usageService *service.UsageService, addr string, v
 	srv := grpc.NewServer(
 		grpc.MaxRecvMsgSize(domain.MaxRequestBytes),
 		// Auth runs first, so refusals are logged at Warn rather than as errors.
-		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(verifier, grpcScopes), loggingInterceptor),
+		grpc.ChainUnaryInterceptor(metricsInterceptor, auth.UnaryInterceptor(verifier, grpcScopes), loggingInterceptor),
 		grpc.StreamInterceptor(auth.StreamInterceptor(verifier)),
 	)
 
@@ -91,6 +93,7 @@ func (s *GRPCServer) RecordUsageEvent(ctx context.Context, req *pb.RecordUsageEv
 
 	event, err := protoToEvent(req.Event)
 	if err != nil {
+		metrics.Events.WithLabelValues("invalid").Inc()
 		return nil, status.Errorf(codes.InvalidArgument, "invalid event: %v", err)
 	}
 
@@ -117,6 +120,7 @@ func (s *GRPCServer) RecordUsageEvents(ctx context.Context, req *pb.RecordUsageE
 	for i, pbEvent := range req.Events {
 		event, err := protoToEvent(pbEvent)
 		if err != nil {
+			metrics.Events.WithLabelValues("invalid").Add(float64(len(req.Events))) // the whole batch is refused
 			return nil, status.Errorf(codes.InvalidArgument, "invalid event at index %d: %v", i, err)
 		}
 		events = append(events, event)
@@ -292,6 +296,15 @@ func domainStatusToProto(s domain.Status) pb.Status {
 	default:
 		return pb.Status_STATUS_UNSPECIFIED
 	}
+}
+
+// metricsInterceptor is outermost, so refused calls are counted too.
+func metricsInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	start := time.Now()
+	resp, err := handler(ctx, req)
+	metrics.Requests.WithLabelValues("grpc", info.FullMethod, status.Code(err).String()).Inc()
+	metrics.RequestDuration.WithLabelValues("grpc", info.FullMethod).Observe(time.Since(start).Seconds())
+	return resp, err
 }
 
 // loggingInterceptor logs gRPC requests

@@ -10,9 +10,11 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ai-process/light-tokenmeter/internal/domain"
+	"github.com/ai-process/light-tokenmeter/internal/metrics"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 	"github.com/ai-process/light-tokenmeter/internal/testdb"
 )
@@ -164,6 +166,8 @@ func TestReplicatorKeepsClickHouseInStepWithPostgres(t *testing.T) {
 	s := newStack(t)
 	ctx := context.Background()
 
+	copied0 := testutil.ToFloat64(metrics.Copied)
+	unreachable0 := testutil.ToFloat64(metrics.InsertFailures.WithLabelValues("unreachable"))
 	s.record(t, 500, "m")
 	down := NewReplicator(s.repo, &flakyConn{Conn: s.ch.Conn(), fails: 3}, 200, 5*time.Millisecond)
 	require.True(t, down.copyBatch(), "a full batch, once ClickHouse is back")
@@ -179,6 +183,9 @@ func TestReplicatorKeepsClickHouseInStepWithPostgres(t *testing.T) {
 	s.drain(t, NewReplicator(s.repo, s.ch.Conn(), 200, 5*time.Millisecond))
 	require.EqualValues(t, 1200, pgTotals(t, s.repo, s.from, time.Now().Add(time.Hour)).requests)
 	s.requireInStep(t, totals{})
+	// The crashed insert bypassed copyBatch, so each event is counted once.
+	require.Equal(t, copied0+1200, testutil.ToFloat64(metrics.Copied))
+	require.Equal(t, unreachable0+3, testutil.ToFloat64(metrics.InsertFailures.WithLabelValues("unreachable")))
 }
 
 func expireLease(t *testing.T, s *stack, owner, batch uuid.UUID) {
