@@ -254,6 +254,7 @@ releases fix bugs.
 | Errors | HTTP status codes and `code` values above; gRPC status codes; the `invalid event at index N` message prefix on both. New codes may appear, so treat an unknown one like its status. |
 | Authentication | `Authorization: Bearer`, the `write` and `read` scopes and the `TOKENMETER_TOKENS` entry format, see [Authentication](#authentication). |
 | Probes | `/healthz` and `/readyz`, their status codes and the `status` and `clickhouse` fields. |
+| Metrics | Names, types and labels of the `tokenmeter_*` metrics in [Metrics](#metrics). New metrics and label values may appear. |
 | Environment variables | Names and meaning of every variable in [Configuration](#configuration), and their defaults, except tuning knobs (`CLICKHOUSE_BATCH_SIZE`, `CLICKHOUSE_FLUSH_INTERVAL`, `DB_MAX_CONNS`, `DB_MIN_CONNS`), whose defaults may change in a minor release with a changelog note. |
 | Storage | Any 1.x release upgrades the Postgres and ClickHouse schemas of an earlier one by itself at startup, with no manual steps. The tables are not an API, except as the recipes in this README use them. |
 | Limits | 500 events per batch, 16 MiB per request, and the field and `meta` limits in [Sending events](#sending-events) never shrink. |
@@ -289,6 +290,7 @@ Environment variables (see [`env.example`](env.example)):
 | `DATABASE_URL` | local dev URL | Postgres connection string. **Always set it.** |
 | `GRPC_ADDR` | `:9090` | gRPC listen address. |
 | `HTTP_ADDR` | `:8080` | HTTP listen address. |
+| `METRICS_ADDR` | `:9091` | Prometheus `/metrics` and `/healthz`, see [Metrics](#metrics). Set it empty to turn them off. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `LOG_FORMAT` | `json` | Log format: `json` (structured JSON on stdout) or `console` (colored human-readable). |
 | `SHUTDOWN_TIMEOUT` | `30s` | Graceful shutdown window. |
@@ -369,6 +371,53 @@ and `meta`; avoid personal data you would not want in a database.
 - **Upgrades**: deploy a newer image tag; see [Versions and upgrades](#versions-and-upgrades).
 - **Backups**: Postgres holds everything (ClickHouse can be rebuilt from it); back it up like any other.
 - **Logs**: structured JSON on stdout.
+
+### Metrics
+
+`/metrics` on `METRICS_ADDR` (`:9091`), with the Go and process metrics:
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `tokenmeter_events_total` | counter | `result`: `created`, `duplicate`, `invalid` | Events received. A refused batch counts all its events as `invalid`; a body that cannot be read shows only in `tokenmeter_requests_total` (400 or 413). |
+| `tokenmeter_requests_total` | counter | `transport` (`http`, `grpc`), `route` (pattern or RPC), `code` | API requests, including those refused by auth; probes are not counted. A client that gives up shows as `Canceled` or `DeadlineExceeded`. |
+| `tokenmeter_request_duration_seconds` | histogram | `transport`, `route` | API request duration: writes and report queries. |
+| `tokenmeter_storage_errors_total` | counter | `store` (`postgres`, `clickhouse`), `op` | Failed storage operations. |
+| `tokenmeter_read_fallbacks_total` | counter | | Reports answered from Postgres because ClickHouse failed. |
+| `tokenmeter_clickhouse_enabled` | gauge | | 1 when `CLICKHOUSE_ENABLED` is set. |
+| `tokenmeter_clickhouse_serving` | gauge | | 1 while reports come from ClickHouse; 0 while not connected, backfilling, or after a failed ClickHouse query. |
+| `tokenmeter_clickhouse_copied_events_total` | counter | | Events copied to ClickHouse. |
+| `tokenmeter_clickhouse_insert_failures_total` | counter | `reason`: `unreachable`, `refused` | Failed ClickHouse inserts (retried or postponed, never dropped). |
+| `tokenmeter_clickhouse_outbox_events` | gauge | | Events waiting for ClickHouse, sampled every 15 s and counted up to 1 000 000. |
+| `tokenmeter_clickhouse_outbox_oldest_seconds` | gauge | | Age of the oldest waiting event: how far ClickHouse reports trail Postgres. |
+| `tokenmeter_build_info` | gauge | `version` | 1, labelled with the running release. |
+
+Suggested alerts:
+
+```yaml
+groups:
+  - name: light-tokenmeter
+    rules:
+      - alert: TokenmeterDown
+        expr: up{job="light-tokenmeter"} == 0
+        for: 2m
+      - alert: TokenmeterWritesFailing # events are not being recorded
+        expr: sum(rate(tokenmeter_requests_total{route=~".*(events|RecordUsageEvent).*", code=~"5..|Internal|Unavailable"}[5m])) > 0
+        for: 5m
+      - alert: TokenmeterInvalidEvents # a client sends events that are refused
+        expr: sum(rate(tokenmeter_events_total{result="invalid"}[15m])) > 0
+        for: 15m
+      - alert: TokenmeterAuthRefusals # a client lost its token, or someone is probing
+        expr: sum(rate(tokenmeter_requests_total{code=~"401|403|Unauthenticated|PermissionDenied"}[10m])) > 0.1
+        for: 10m
+      - alert: TokenmeterClickHouseBehind # ClickHouse-served reports undercount
+        expr: max(tokenmeter_clickhouse_outbox_oldest_seconds) > 600 and on() max(tokenmeter_clickhouse_serving) == 1
+        for: 10m
+      - alert: TokenmeterClickHouseRefusing # a batch waits for a fix, see "ClickHouse"
+        expr: sum(increase(tokenmeter_clickhouse_insert_failures_total{reason="refused"}[30m])) > 0
+      - alert: TokenmeterReportsFromPostgres # ClickHouse configured but not serving
+        expr: tokenmeter_clickhouse_enabled == 1 and tokenmeter_clickhouse_serving == 0
+        for: 15m
+```
 
 ### ClickHouse
 

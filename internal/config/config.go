@@ -11,6 +11,7 @@ type Config struct {
 	DatabaseURL     string
 	GRPCAddr        string
 	HTTPAddr        string
+	MetricsAddr     string
 	LogLevel        string
 	LogFormat       string
 	ShutdownTimeout time.Duration
@@ -45,6 +46,7 @@ func Load() *Config {
 		DatabaseURL:             getEnv("DATABASE_URL", "postgres://tokenmeter:tokenmeter@localhost:5432/tokenmeter?sslmode=disable"),
 		GRPCAddr:                getEnv("GRPC_ADDR", ":9090"),
 		HTTPAddr:                getEnv("HTTP_ADDR", ":8080"),
+		MetricsAddr:             getEnvAllowEmpty("METRICS_ADDR", ":9091"),
 		LogLevel:                getEnv("LOG_LEVEL", "info"),
 		LogFormat:               getEnv("LOG_FORMAT", "json"),
 		ShutdownTimeout:         getDurationEnv("SHUTDOWN_TIMEOUT", 30*time.Second),
@@ -70,6 +72,14 @@ func Load() *Config {
 
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// getEnvAllowEmpty lets a set-but-empty variable turn a feature off.
+func getEnvAllowEmpty(key, defaultValue string) string {
+	if value, ok := os.LookupEnv(key); ok {
 		return value
 	}
 	return defaultValue

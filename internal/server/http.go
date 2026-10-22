@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/ai-process/light-tokenmeter/internal/auth"
 	"github.com/ai-process/light-tokenmeter/internal/domain"
+	"github.com/ai-process/light-tokenmeter/internal/metrics"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 	"github.com/ai-process/light-tokenmeter/internal/service"
 )
@@ -41,6 +43,8 @@ func NewHTTPServerWithService(usageService *service.UsageService, repo *reposito
 	mux := http.NewServeMux()
 
 	// Health endpoints
+	route := func(pattern string, h http.Handler) { mux.Handle(pattern, instrument(pattern, h)) }
+	// Probes are not API traffic and stay out of the request metrics.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 
@@ -50,9 +54,9 @@ func NewHTTPServerWithService(usageService *service.UsageService, repo *reposito
 			writeError(w, status, code, message, "")
 		}, h)
 	}
-	mux.Handle("POST /v1/usage/events", require(auth.Write, s.handleRecordEvent))
-	mux.Handle("POST /v1/usage/events:batch", require(auth.Write, s.handleRecordEvents))
-	mux.Handle("GET /v1/usage/summary", require(auth.Read, s.handleGetSummary))
+	route("POST /v1/usage/events", require(auth.Write, s.handleRecordEvent))
+	route("POST /v1/usage/events:batch", require(auth.Write, s.handleRecordEvents))
+	route("GET /v1/usage/summary", require(auth.Read, s.handleGetSummary))
 
 	s.server = &http.Server{
 		Addr:         addr,
@@ -200,6 +204,7 @@ func (s *HTTPServer) handleRecordEvent(w http.ResponseWriter, r *http.Request) {
 
 	event, err := httpRequestToEvent(&req)
 	if err != nil {
+		metrics.Events.WithLabelValues("invalid").Inc()
 		writeError(w, http.StatusBadRequest, "validation_error", err.Error(), "")
 		return
 	}
@@ -226,6 +231,7 @@ func (s *HTTPServer) handleRecordEvents(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if len(req.Events) > domain.MaxBatchSize {
+		metrics.Events.WithLabelValues("invalid").Add(float64(len(req.Events)))
 		writeError(w, http.StatusBadRequest, "validation_error", fmt.Sprintf("Batch size exceeds maximum of %d events", domain.MaxBatchSize), "")
 		return
 	}
@@ -234,6 +240,7 @@ func (s *HTTPServer) handleRecordEvents(w http.ResponseWriter, r *http.Request) 
 	for i, eventReq := range req.Events {
 		event, err := httpRequestToEvent(&eventReq)
 		if err != nil {
+			metrics.Events.WithLabelValues("invalid").Add(float64(len(req.Events))) // the whole batch is refused
 			writeError(w, http.StatusBadRequest, "validation_error", fmt.Sprintf("invalid event at index %d: %s", i, err.Error()), "")
 			return
 		}
@@ -394,6 +401,28 @@ func writeError(w http.ResponseWriter, status int, code, message, details string
 		Details: details,
 	}
 	writeJSON(w, status, resp)
+}
+
+// statusRecorder keeps the status code for the request metrics.
+type statusRecorder struct {
+	http.ResponseWriter
+	code int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.code = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// instrument counts and times a route under its pattern, a bounded label set.
+func instrument(pattern string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		metrics.Requests.WithLabelValues("http", pattern, strconv.Itoa(rec.code)).Inc()
+		metrics.RequestDuration.WithLabelValues("http", pattern).Observe(time.Since(start).Seconds())
+	})
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/ai-process/light-tokenmeter/internal/auth"
 	"github.com/ai-process/light-tokenmeter/internal/domain"
+	"github.com/ai-process/light-tokenmeter/internal/metrics"
 
 	pb "github.com/ai-process/light-tokenmeter/gen/usage/v1"
 )
@@ -264,4 +266,51 @@ func TestHTTPServer_BodyLimit(t *testing.T) {
 	h.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
 	assert.Contains(t, w.Body.String(), `"code":"request_too_large"`)
+}
+
+func TestRequestAndEventMetrics(t *testing.T) {
+	h := NewHTTPServer(nil, ":0").server.Handler
+	probeSeries := func() int {
+		n := 0
+		mfs, err := metrics.Registry.Gather()
+		require.NoError(t, err)
+		for _, mf := range mfs {
+			for _, m := range mf.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == "route" && (strings.Contains(l.GetValue(), "healthz") || strings.Contains(l.GetValue(), "readyz") || strings.Contains(l.GetValue(), "grpc.health")) {
+						n++
+					}
+				}
+			}
+		}
+		return n
+	}
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	invalid := metrics.Events.WithLabelValues("invalid")
+	before := testutil.ToFloat64(invalid)
+	body, _ := json.Marshal(recordEventsRequest{Events: []recordEventRequest{{EventID: "x"}, {EventID: "y"}, {EventID: "z"}}})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/usage/events:batch", bytes.NewReader(body)))
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, before+3, testutil.ToFloat64(invalid), "a refused batch counts all its events")
+	assert.GreaterOrEqual(t, testutil.ToFloat64(metrics.Requests.WithLabelValues("http", "POST /v1/usage/events:batch", "400")), float64(1), "the refusal is counted under its route")
+
+	srv := NewGRPCServerWithService(nil, "", testVerifier(t))
+	lis := bufconn.Listen(1 << 20)
+	go func() { _ = srv.server.Serve(lis) }()
+	t.Cleanup(srv.server.Stop)
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	_, err = healthpb.NewHealthClient(conn).Check(context.Background(), &healthpb.HealthCheckRequest{})
+	require.NoError(t, err)
+	assert.Zero(t, probeSeries(), "probes are not API traffic")
+	refused := metrics.Requests.WithLabelValues("grpc", pb.UsageService_RecordUsageEvents_FullMethodName, "Unauthenticated")
+	before = testutil.ToFloat64(refused)
+	_, err = pb.NewUsageServiceClient(conn).RecordUsageEvents(context.Background(), &pb.RecordUsageEventsRequest{})
+	require.Equal(t, codes.Unauthenticated, status.Code(err))
+	assert.Equal(t, before+1, testutil.ToFloat64(refused), "calls refused by auth are counted")
 }

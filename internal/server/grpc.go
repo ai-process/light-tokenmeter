@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/ai-process/light-tokenmeter/internal/auth"
 	"github.com/ai-process/light-tokenmeter/internal/domain"
+	"github.com/ai-process/light-tokenmeter/internal/metrics"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 	"github.com/ai-process/light-tokenmeter/internal/service"
 
@@ -49,7 +52,7 @@ func NewGRPCServerWithService(usageService *service.UsageService, addr string, v
 	srv := grpc.NewServer(
 		grpc.MaxRecvMsgSize(domain.MaxRequestBytes),
 		// Auth runs first, so refusals are logged at Warn rather than as errors.
-		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(verifier, grpcScopes), loggingInterceptor),
+		grpc.ChainUnaryInterceptor(metricsInterceptor, auth.UnaryInterceptor(verifier, grpcScopes), loggingInterceptor),
 		grpc.StreamInterceptor(auth.StreamInterceptor(verifier)),
 	)
 
@@ -86,18 +89,20 @@ func (s *GRPCServer) Stop() {
 // RecordUsageEvent records a single usage event
 func (s *GRPCServer) RecordUsageEvent(ctx context.Context, req *pb.RecordUsageEventRequest) (*pb.RecordUsageEventResponse, error) {
 	if req.Event == nil {
+		metrics.Events.WithLabelValues("invalid").Inc()
 		return nil, status.Error(codes.InvalidArgument, "event is required")
 	}
 
 	event, err := protoToEvent(req.Event)
 	if err != nil {
+		metrics.Events.WithLabelValues("invalid").Inc()
 		return nil, status.Errorf(codes.InvalidArgument, "invalid event: %v", err)
 	}
 
 	created, err := s.service.RecordEvent(ctx, event)
 	if err != nil {
 		log.Error().Err(err).Str("event_id", event.EventID.String()).Msg("failed to record event")
-		return nil, status.Errorf(codes.Internal, "failed to record event: %v", err)
+		return nil, internal(ctx, "failed to record event", err)
 	}
 
 	return &pb.RecordUsageEventResponse{Created: created}, nil
@@ -110,6 +115,7 @@ func (s *GRPCServer) RecordUsageEvents(ctx context.Context, req *pb.RecordUsageE
 	}
 
 	if len(req.Events) > domain.MaxBatchSize {
+		metrics.Events.WithLabelValues("invalid").Add(float64(len(req.Events)))
 		return nil, status.Errorf(codes.InvalidArgument, "batch size exceeds maximum of %d events", domain.MaxBatchSize)
 	}
 
@@ -117,6 +123,7 @@ func (s *GRPCServer) RecordUsageEvents(ctx context.Context, req *pb.RecordUsageE
 	for i, pbEvent := range req.Events {
 		event, err := protoToEvent(pbEvent)
 		if err != nil {
+			metrics.Events.WithLabelValues("invalid").Add(float64(len(req.Events))) // the whole batch is refused
 			return nil, status.Errorf(codes.InvalidArgument, "invalid event at index %d: %v", i, err)
 		}
 		events = append(events, event)
@@ -125,7 +132,7 @@ func (s *GRPCServer) RecordUsageEvents(ctx context.Context, req *pb.RecordUsageE
 	created, duplicates, err := s.service.RecordEvents(ctx, events)
 	if err != nil {
 		log.Error().Err(err).Int("batch_size", len(events)).Msg("failed to record events batch")
-		return nil, status.Errorf(codes.Internal, "failed to record events: %v", err)
+		return nil, internal(ctx, "failed to record events", err)
 	}
 
 	return &pb.RecordUsageEventsResponse{
@@ -160,7 +167,7 @@ func (s *GRPCServer) GetUsageSummary(ctx context.Context, req *pb.GetUsageSummar
 	rows, truncated, err := s.service.GetSummary(ctx, params)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get usage summary")
-		return nil, status.Errorf(codes.Internal, "failed to get summary: %v", err)
+		return nil, internal(ctx, "failed to get summary", err)
 	}
 
 	pbRows := make([]*pb.UsageSummaryRow, 0, len(rows))
@@ -204,7 +211,7 @@ func (s *GRPCServer) GetUsageByMeta(ctx context.Context, req *pb.GetUsageByMetaR
 	})
 	if err != nil {
 		log.Error().Err(err).Str("meta_key", req.MetaKey).Msg("failed to get usage by meta")
-		return nil, status.Errorf(codes.Internal, "failed to get usage by meta: %v", err)
+		return nil, internal(ctx, "failed to get usage by meta", err)
 	}
 
 	pbRows := make([]*pb.UsageByMetaRow, 0, len(rows))
@@ -292,6 +299,27 @@ func domainStatusToProto(s domain.Status) pb.Status {
 	default:
 		return pb.Status_STATUS_UNSPECIFIED
 	}
+}
+
+// internal reports a storage failure, or the caller's own cancellation as
+// such, so a client giving up does not look like a broken service.
+func internal(ctx context.Context, what string, err error) error {
+	if ctx.Err() != nil {
+		return status.FromContextError(ctx.Err()).Err()
+	}
+	return status.Errorf(codes.Internal, "%s: %v", what, err)
+}
+
+// metricsInterceptor is outermost, so refused calls are counted too.
+func metricsInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	if strings.HasPrefix(info.FullMethod, "/grpc.health.") {
+		return handler(ctx, req) // probes are not API traffic
+	}
+	start := time.Now()
+	resp, err := handler(ctx, req)
+	metrics.Requests.WithLabelValues("grpc", info.FullMethod, status.Code(err).String()).Inc()
+	metrics.RequestDuration.WithLabelValues("grpc", info.FullMethod).Observe(time.Since(start).Seconds())
+	return resp, err
 }
 
 // loggingInterceptor logs gRPC requests

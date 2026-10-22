@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/ai-process/light-tokenmeter/internal/domain"
+	"github.com/ai-process/light-tokenmeter/internal/metrics"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 )
 
@@ -98,6 +99,7 @@ func (r *Replicator) copyBatch() bool {
 	batch, events, err := r.outbox.ClaimOutbox(r.ctx, r.id, r.batchSize, lease)
 	if err != nil {
 		if r.ctx.Err() == nil {
+			metrics.StorageErrors.WithLabelValues("postgres", "outbox_claim").Inc()
 			log.Error().Err(err).Msg("clickhouse replicator: cannot read the outbox")
 		}
 		return false
@@ -117,9 +119,11 @@ func (r *Replicator) copyBatch() bool {
 			return false // closing: the batch is copied once its lease ends
 		}
 		if refusesData(err) {
+			metrics.InsertFailures.WithLabelValues("refused").Inc()
 			r.postpone(log, batch, len(events), err)
 			return false // pace refusals: a broken schema refuses every batch
 		}
+		metrics.InsertFailures.WithLabelValues("unreachable").Inc()
 		if time.Since(held) > r.holdMax {
 			r.postpone(log, batch, len(events), err)
 			r.pause(r.retryMax) // an outage fails the next batch too; don't churn claims
@@ -149,6 +153,7 @@ func (r *Replicator) copyBatch() bool {
 		log.Error().Err(err).Msg("clickhouse replicator: cannot acknowledge a copied batch; ClickHouse skips it when retried")
 		return false
 	}
+	metrics.Copied.Add(float64(len(events))) // after the ack, so a retried batch counts once
 	return true
 }
 

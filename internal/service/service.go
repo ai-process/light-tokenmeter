@@ -7,6 +7,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/ai-process/light-tokenmeter/internal/domain"
+	"github.com/ai-process/light-tokenmeter/internal/metrics"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 )
 
@@ -42,6 +43,7 @@ func NewUsageService(repo *repository.Repository) *UsageService {
 // WithAnalytics configures an analytical engine (e.g., ClickHouse).
 func (s *UsageService) WithAnalytics(r AnalyticsReader) *UsageService {
 	s.analytics.Store(&r)
+	metrics.ClickHouseUp.Set(1)
 	return s
 }
 
@@ -57,7 +59,13 @@ func (s *UsageService) Analytics() AnalyticsReader {
 func (s *UsageService) RecordEvent(ctx context.Context, event *domain.UsageEvent) (bool, error) {
 	created, err := s.repo.InsertOne(ctx, event)
 	if err != nil {
+		countStorageError(ctx, "postgres", "insert")
 		return false, err
+	}
+	if created {
+		metrics.Events.WithLabelValues("created").Inc()
+	} else {
+		metrics.Events.WithLabelValues("duplicate").Inc()
 	}
 
 	if created {
@@ -81,9 +89,12 @@ func (s *UsageService) RecordEvent(ctx context.Context, event *domain.UsageEvent
 func (s *UsageService) RecordEvents(ctx context.Context, events []*domain.UsageEvent) (created, duplicates int, err error) {
 	inserted, err := s.repo.InsertBatch(ctx, events)
 	if err != nil {
+		countStorageError(ctx, "postgres", "insert")
 		return 0, 0, err
 	}
 	created, duplicates = len(inserted), len(events)-len(inserted)
+	metrics.Events.WithLabelValues("created").Add(float64(created))
+	metrics.Events.WithLabelValues("duplicate").Add(float64(duplicates))
 
 	log.Debug().
 		Int("created", created).
@@ -99,13 +110,20 @@ func (s *UsageService) GetSummary(ctx context.Context, params domain.SummaryPara
 	if a := s.Analytics(); a != nil {
 		rows, truncated, err := a.QuerySummary(ctx, params)
 		if err == nil || ctx.Err() != nil {
+			if err == nil {
+				metrics.ClickHouseUp.Set(1)
+			}
 			return rows, truncated, err
 		}
+		metrics.ClickHouseUp.Set(0)
+		metrics.StorageErrors.WithLabelValues("clickhouse", "summary").Inc()
+		metrics.ReadFallbacks.Inc()
 		log.Warn().Err(err).Msg("clickhouse summary failed; answering from postgres")
 	}
 
 	rows, truncated, err := s.repo.QuerySummary(ctx, params)
 	if err != nil {
+		countStorageError(ctx, "postgres", "summary")
 		return nil, false, err
 	}
 
@@ -125,13 +143,20 @@ func (s *UsageService) GetUsageByMeta(ctx context.Context, params domain.MetaUsa
 	if a := s.Analytics(); a != nil {
 		rows, truncated, err := a.QueryUsageByMeta(ctx, params)
 		if err == nil || ctx.Err() != nil {
+			if err == nil {
+				metrics.ClickHouseUp.Set(1)
+			}
 			return rows, truncated, err
 		}
+		metrics.ClickHouseUp.Set(0)
+		metrics.StorageErrors.WithLabelValues("clickhouse", "usage_by_meta").Inc()
+		metrics.ReadFallbacks.Inc()
 		log.Warn().Err(err).Msg("clickhouse usage-by-meta failed; answering from postgres")
 	}
 
 	rows, truncated, err := s.repo.QueryUsageByMeta(ctx, params)
 	if err != nil {
+		countStorageError(ctx, "postgres", "usage_by_meta")
 		return nil, false, err
 	}
 
@@ -143,4 +168,11 @@ func (s *UsageService) GetUsageByMeta(ctx context.Context, params domain.MetaUsa
 		Msg("queried usage by meta")
 
 	return rows, truncated, nil
+}
+
+// countStorageError skips a caller that gave up: that is not the store failing.
+func countStorageError(ctx context.Context, store, op string) {
+	if ctx.Err() == nil {
+		metrics.StorageErrors.WithLabelValues(store, op).Inc()
+	}
 }
