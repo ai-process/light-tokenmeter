@@ -16,7 +16,15 @@ import (
 
 // Repository handles database operations for usage events
 type Repository struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	outbox bool
+}
+
+// WithOutbox makes every new event also land in clickhouse_outbox, in the
+// same statement, for the ClickHouse replicator to copy.
+func (r *Repository) WithOutbox() *Repository {
+	r.outbox = true
+	return r
 }
 
 // New creates a new repository with the given connection pool
@@ -45,6 +53,10 @@ func (r *Repository) InsertOne(ctx context.Context, event *domain.UsageEvent) (b
 		)
 		ON CONFLICT (event_id) DO NOTHING
 	`
+	if r.outbox {
+		query = `WITH ins AS (` + query + ` RETURNING event_id)
+		INSERT INTO clickhouse_outbox (event_id) SELECT event_id FROM ins`
+	}
 
 	tag, err := r.pool.Exec(ctx, query,
 		event.EventID,
@@ -146,12 +158,18 @@ func (r *Repository) InsertBatch(ctx context.Context, events []*domain.UsageEven
 	log.Debug().Int64("copied", copyCount).Msg("copied events to temp table")
 
 	// Insert from temp to main table with ON CONFLICT DO NOTHING
-	inserted, err := tx.Query(ctx, `
+	insert := `
 		INSERT INTO usage_events
 		SELECT * FROM temp_usage_events
 		ON CONFLICT (event_id) DO NOTHING
 		RETURNING event_id
-	`)
+	`
+	if r.outbox {
+		insert = `WITH ins AS (` + insert + `),
+		ob AS (INSERT INTO clickhouse_outbox (event_id) SELECT event_id FROM ins)
+		SELECT event_id FROM ins`
+	}
+	inserted, err := tx.Query(ctx, insert)
 	if err != nil {
 		return nil, fmt.Errorf("insert from temp: %w", err)
 	}

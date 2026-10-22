@@ -16,7 +16,7 @@ who is worthy.
 - **Flexible reads.** Time-bucketed (per day) summaries with any combination of filters
   and groupings, plus aggregation over your own metadata (e.g. everything one batch job spent).
 - **Two APIs.** HTTP/JSON for curl and dashboards, gRPC for services.
-- **Scalable analytics with ClickHouse.** Optional asynchronous batch buffering and analytical aggregations over large event volumes with automatic TTL retention.
+- **Scalable analytics with ClickHouse.** Optional: events are copied from Postgres to ClickHouse in batches, without loss or double counting, and reports are served from ClickHouse with automatic TTL retention.
 
 ## Contents
 
@@ -131,7 +131,7 @@ An event describes one model call:
 | `vendor` | string ≤64 | yes | `openai`, `anthropic`, `google`, … (free-form). |
 | `model` | string ≤128 | yes | Model name. |
 | `status` | string | yes | `success`, `error`, `cancelled` or `timeout`. |
-| `occurred_at` | RFC 3339 | no | When it happened; the server's clock is used otherwise. |
+| `occurred_at` | RFC 3339 | no | When it happened, from 1900 to April 2262; the server's clock is used when it is missing or the zero time. |
 | `duration_ms` | int | no | Call latency. |
 | `tokens_input`, `tokens_output` | int | no | Token counts. |
 | `tokens_total` | int | no | Defaults to input + output; if given it must equal that sum. |
@@ -251,13 +251,13 @@ Environment variables (see [`env.example`](env.example)):
 | `SENTRY_ENABLE_TRACING` | `false` | Sentry performance tracing. |
 | `SENTRY_DEBUG` | `false` | Enable Sentry SDK debug logging. |
 | `SENTRY_WITH_BREADCRUMBS` | `false` | Include breadcrumbs in Sentry error reports. |
-| `CLICKHOUSE_ENABLED` | `false` | Enable ClickHouse for async batch storage and high-scale analytics. |
+| `CLICKHOUSE_ENABLED` | `false` | Copy events to ClickHouse and serve reports from it, see [ClickHouse](#clickhouse). |
 | `CLICKHOUSE_ADDR` | `localhost:9000` | ClickHouse native TCP address. |
 | `CLICKHOUSE_DATABASE` | `tokenmeter` | ClickHouse database name. |
 | `CLICKHOUSE_USER` | `default` | ClickHouse user. |
 | `CLICKHOUSE_PASSWORD` | empty | ClickHouse password. |
-| `CLICKHOUSE_BATCH_SIZE` | `5000` | Maximum number of events to buffer before flushing to ClickHouse. |
-| `CLICKHOUSE_FLUSH_INTERVAL` | `1s` | Maximum time to buffer events before flushing to ClickHouse. |
+| `CLICKHOUSE_BATCH_SIZE` | `5000` | Most events copied to ClickHouse in one insert. |
+| `CLICKHOUSE_FLUSH_INTERVAL` | `1s` | How often waiting events are copied to ClickHouse; reports lag by about this much. |
 
 ## Security
 
@@ -279,7 +279,7 @@ are separated by commas or newlines, and in a file `#` starts a comment:
 
 ```bash
 TOKEN=$(openssl rand -hex 32)                  # give this to the client
-printf %s "$TOKEN" | sha256sum | cut -d' ' -f1 # put this in the config
+printf %s "$TOKEN" | openssl dgst -sha256 -r | cut -d' ' -f1 # put this in the config
 TOKENMETER_TOKENS="ktms:write:<hash>,console:read:<hash>"
 ```
 
@@ -318,8 +318,48 @@ and `meta`; avoid personal data you would not want in a database.
 
 - **Migrations** run at startup and are embedded in the binary.
 - **Upgrades**: deploy a newer image tag.
-- **Backups**: it's one Postgres table; back it up like any other.
+- **Backups**: Postgres holds everything (ClickHouse can be rebuilt from it); back it up like any other.
 - **Logs**: structured JSON on stdout.
+
+### ClickHouse
+
+Postgres is always the record. With `CLICKHOUSE_ENABLED=true`:
+
+- **Writes** go to Postgres as usual; each new event is also added, in the same statement, to a
+  `clickhouse_outbox` table. A duplicate `event_id` is added to neither.
+- **Copying**: every `CLICKHOUSE_FLUSH_INTERVAL` each replica takes up to `CLICKHOUSE_BATCH_SIZE`
+  waiting events and inserts them into ClickHouse, then removes them from the outbox. Replicas
+  take different batches.
+- **Reads**: `/v1/usage/summary`, `GetUsageSummary` and `GetUsageByMeta` are answered from
+  ClickHouse, so they trail writes by about one flush interval. If ClickHouse fails a query, or
+  is not reachable yet, the answer comes from Postgres.
+- **Startup and readiness**: the service starts and is ready without ClickHouse; it connects in
+  the background and `/readyz` reports `"clickhouse":"unavailable"` meanwhile (or while it is
+  down), without failing.
+- **ClickHouse unreachable** (or failing for reasons not about the rows): the replica keeps its
+  batch, renews its two-minute lease, and retries with backoff up to 15 s apart. A batch still
+  failing after five minutes is postponed like a refused one, in case the trouble is its own.
+  Nothing is dropped, and writes keep working; the outbox drains once ClickHouse is back.
+- **ClickHouse refusing rows** (a data error such as a type mismatch, often a changed schema): the
+  batch is postponed, 30 s and then up to 10 minutes later, while the events behind it flow. It
+  keeps its deduplication token and is never split or dropped, so it cannot be counted twice; an
+  error with the batch ID and ClickHouse's message is logged on every refusal. Fix the cause and
+  the batch goes through at its next retry.
+- **Restart or crash**: waiting events stay in the outbox. A batch inserted but not yet removed
+  is taken over when its lease ends and inserted again under the same deduplication token;
+  ClickHouse ignores the repeat, as it remembers the last 100 000 inserts
+  (`non_replicated_deduplication_window`; a `ReplicatedMergeTree` you create yourself needs
+  `replicated_deduplication_window`).
+
+Migrations need a ClickHouse user allowed to create and alter `usage_events`; until they apply,
+the service records to Postgres and logs the error. Set `CLICKHOUSE_ENABLED` the same on every
+replica: an event written by a replica with it off is never queued for ClickHouse.
+
+Events recorded before ClickHouse was turned on, or while it was off, are not copied; Postgres
+reports still include them. Versions before 1.0 kept events in memory and could drop them; to rebuild ClickHouse from
+Postgres, empty its `usage_events` table and run
+`INSERT INTO clickhouse_outbox (event_id) SELECT event_id FROM usage_events ON CONFLICT DO NOTHING`
+in Postgres.
 
 ## Development
 

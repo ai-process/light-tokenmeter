@@ -97,19 +97,21 @@ func (s *HTTPServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.service != nil && s.service.Analytics() != nil {
+	// ClickHouse down is not unready: writes go to Postgres and its outbox,
+	// and reads fall back to Postgres.
+	body := `{"status":"ready"}`
+	if s.service != nil && s.service.AnalyticsMissing() {
+		body = `{"status":"ready","clickhouse":"unavailable"}`
+	} else if s.service != nil && s.service.Analytics() != nil {
 		if err := s.service.Analytics().Ping(ctx); err != nil {
-			log.Warn().Err(err).Msg("readiness check failed: clickhouse unavailable")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"status":"not ready","error":"analytics unavailable"}`))
-			return
+			log.Warn().Err(err).Msg("clickhouse unavailable; serving reads from postgres")
+			body = `{"status":"ready","clickhouse":"unavailable"}`
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ready"}`))
+	_, _ = w.Write([]byte(body))
 }
 
 // API request/response types

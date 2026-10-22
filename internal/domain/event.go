@@ -87,6 +87,7 @@ var (
 	ErrModelTooLong     = errors.New("model exceeds 128 characters")
 	ErrTokensMismatch   = errors.New("tokens_total must equal tokens_input + tokens_output")
 	ErrNegativeCost     = errors.New("cost_nanousd must not be negative")
+	ErrOccurredAtRange  = errors.New("occurred_at must be between 1900-01-01 and 2262-04-10")
 	ErrBatchTooLarge    = errors.New("batch size exceeds maximum of 500 events")
 )
 
@@ -95,6 +96,11 @@ const (
 	MaxVendorLength = 64
 	MaxModelLength  = 128
 	MaxBatchSize    = 500
+)
+
+var (
+	minOccurredAt = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
+	maxOccurredAt = time.Date(2262, 4, 11, 0, 0, 0, 0, time.UTC) // nanoseconds since 1970 fit int64
 )
 
 // Validate validates the usage event
@@ -137,6 +143,14 @@ func (e *UsageEvent) Validate() error {
 	}
 	if e.CostNanoUSD < 0 {
 		return ErrNegativeCost
+	}
+	// Go's zero time is what clients send for "unset"; anything else must fit
+	// what the ClickHouse driver can encode, or it would be corrupted there.
+	if e.OccurredAt != nil && e.OccurredAt.IsZero() {
+		e.OccurredAt = nil
+	}
+	if e.OccurredAt != nil && (e.OccurredAt.Before(minOccurredAt) || !e.OccurredAt.Before(maxOccurredAt)) {
+		return ErrOccurredAtRange
 	}
 
 	// Validate or compute tokens_total

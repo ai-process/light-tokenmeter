@@ -75,9 +75,7 @@ func main() {
 	// Create usage service
 	usageSvc := service.NewUsageService(repo)
 
-	var chClient *clickhouse.Client
-	var chWriter *clickhouse.BatchWriter
-
+	var ch *clickhouseStack
 	if cfg.ClickHouseEnabled {
 		log.Info().
 			Str("addr", cfg.ClickHouseAddr).
@@ -85,28 +83,11 @@ func main() {
 			Int("batch_size", cfg.ClickHouseBatchSize).
 			Dur("flush_interval", cfg.ClickHouseFlushInterval).
 			Msg("initializing ClickHouse storage")
-
-		var err error
-		chClient, err = clickhouse.Connect(ctx, clickhouse.Config{
-			Addr:          cfg.ClickHouseAddr,
-			Database:      cfg.ClickHouseDatabase,
-			User:          cfg.ClickHouseUser,
-			Password:      cfg.ClickHousePassword,
-			BatchSize:     cfg.ClickHouseBatchSize,
-			FlushInterval: cfg.ClickHouseFlushInterval,
-		})
-		if err != nil {
-			log.Fatal().Err(err).Msg("failed to connect to ClickHouse")
-		}
-
-		if err := chClient.EnsureSchema(ctx); err != nil {
-			log.Fatal().Err(err).Msg("failed to run ClickHouse migrations")
-		}
-
-		chWriter = clickhouse.NewBatchWriter(chClient.Conn(), cfg.ClickHouseBatchSize, cfg.ClickHouseFlushInterval)
-		chWriter.Start()
-
-		usageSvc = usageSvc.WithAnalytics(chClient).WithEventSink(chWriter)
+		// Events reach ClickHouse through the Postgres outbox, so none is lost
+		// to a full buffer, a ClickHouse outage or a restart.
+		repo.WithOutbox()
+		usageSvc.ExpectAnalytics()
+		ch = startClickHouse(ctx, cfg, repo, usageSvc)
 	}
 
 	// Create servers
@@ -155,16 +136,9 @@ func main() {
 		log.Error().Err(err).Msg("HTTP server shutdown error")
 	}
 
-	// Flush and close ClickHouse batch writer and client
-	if chWriter != nil {
-		if err := chWriter.Close(); err != nil {
-			log.Error().Err(err).Msg("ClickHouse batch writer close error")
-		}
-	}
-	if chClient != nil {
-		if err := chClient.Close(); err != nil {
-			log.Error().Err(err).Msg("ClickHouse client close error")
-		}
+	// Events not yet copied stay in the outbox for the next start.
+	if ch != nil {
+		ch.close()
 	}
 
 	// Close database connection
@@ -176,4 +150,65 @@ func main() {
 	}
 
 	log.Info().Msg("shutdown complete")
+}
+
+// clickhouseStack connects in the background: a ClickHouse that is down at
+// startup must not stop the service, which records to Postgres meanwhile.
+type clickhouseStack struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	client *clickhouse.Client
+	repl   *clickhouse.Replicator
+}
+
+func startClickHouse(parent context.Context, cfg *config.Config, repo *repository.Repository, svc *service.UsageService) *clickhouseStack {
+	ctx, cancel := context.WithCancel(parent)
+	st := &clickhouseStack{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(st.done)
+		for backoff := time.Second; ; backoff = min(2*backoff, 30*time.Second) {
+			client, err := clickhouse.Connect(ctx, clickhouse.Config{
+				Addr:     cfg.ClickHouseAddr,
+				Database: cfg.ClickHouseDatabase,
+				User:     cfg.ClickHouseUser,
+				Password: cfg.ClickHousePassword,
+			})
+			if err == nil {
+				if err = client.EnsureSchema(ctx); err != nil {
+					_ = client.Close()
+				}
+			}
+			if err == nil {
+				st.client = client
+				st.repl = clickhouse.NewReplicator(repo, client.Conn(), cfg.ClickHouseBatchSize, cfg.ClickHouseFlushInterval)
+				st.repl.Start()
+				svc.WithAnalytics(client)
+				log.Info().Msg("ClickHouse ready: copying events and serving reports from it")
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			log.Error().Err(err).Dur("retry_in", backoff).Msg("ClickHouse unavailable; recording to Postgres, reports from Postgres")
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return st
+}
+
+func (st *clickhouseStack) close() {
+	st.cancel()
+	<-st.done
+	if st.repl != nil {
+		st.repl.Close()
+	}
+	if st.client != nil {
+		if err := st.client.Close(); err != nil {
+			log.Error().Err(err).Msg("ClickHouse client close error")
+		}
+	}
 }
