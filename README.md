@@ -378,16 +378,16 @@ and `meta`; avoid personal data you would not want in a database.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `tokenmeter_events_total` | counter | `result`: `created`, `duplicate`, `invalid` | Events received. A refused batch counts all its events as `invalid`. |
-| `tokenmeter_requests_total` | counter | `transport` (`http`, `grpc`), `route` (pattern or RPC), `code` | API requests, including those refused by auth. |
-| `tokenmeter_request_duration_seconds` | histogram | `transport`, `route` | Request duration: writes and summary queries. |
+| `tokenmeter_events_total` | counter | `result`: `created`, `duplicate`, `invalid` | Events received. A refused batch counts all its events as `invalid`; a body that cannot be read shows only in `tokenmeter_requests_total` (400 or 413). |
+| `tokenmeter_requests_total` | counter | `transport` (`http`, `grpc`), `route` (pattern or RPC), `code` | API requests, including those refused by auth; probes are not counted. A client that gives up shows as `Canceled` or `DeadlineExceeded`. |
+| `tokenmeter_request_duration_seconds` | histogram | `transport`, `route` | API request duration: writes and report queries. |
 | `tokenmeter_storage_errors_total` | counter | `store` (`postgres`, `clickhouse`), `op` | Failed storage operations. |
 | `tokenmeter_read_fallbacks_total` | counter | | Reports answered from Postgres because ClickHouse failed. |
 | `tokenmeter_clickhouse_enabled` | gauge | | 1 when `CLICKHOUSE_ENABLED` is set. |
-| `tokenmeter_clickhouse_serving` | gauge | | 1 while reports come from ClickHouse. |
+| `tokenmeter_clickhouse_serving` | gauge | | 1 while reports come from ClickHouse; 0 while not connected, backfilling, or after a failed ClickHouse query. |
 | `tokenmeter_clickhouse_copied_events_total` | counter | | Events copied to ClickHouse. |
 | `tokenmeter_clickhouse_insert_failures_total` | counter | `reason`: `unreachable`, `refused` | Failed ClickHouse inserts (retried or postponed, never dropped). |
-| `tokenmeter_clickhouse_outbox_events` | gauge | | Events waiting for ClickHouse, sampled every 15 s. |
+| `tokenmeter_clickhouse_outbox_events` | gauge | | Events waiting for ClickHouse, sampled every 15 s and counted up to 1 000 000. |
 | `tokenmeter_clickhouse_outbox_oldest_seconds` | gauge | | Age of the oldest waiting event: how far ClickHouse reports trail Postgres. |
 | `tokenmeter_build_info` | gauge | `version` | 1, labelled with the running release. |
 
@@ -409,8 +409,8 @@ groups:
       - alert: TokenmeterAuthRefusals # a client lost its token, or someone is probing
         expr: sum(rate(tokenmeter_requests_total{code=~"401|403|Unauthenticated|PermissionDenied"}[10m])) > 0.1
         for: 10m
-      - alert: TokenmeterClickHouseBehind # ClickHouse reports undercount
-        expr: max(tokenmeter_clickhouse_outbox_oldest_seconds) > 600
+      - alert: TokenmeterClickHouseBehind # ClickHouse-served reports undercount
+        expr: max(tokenmeter_clickhouse_outbox_oldest_seconds) > 600 and on() max(tokenmeter_clickhouse_serving) == 1
         for: 10m
       - alert: TokenmeterClickHouseRefusing # a batch waits for a fix, see "ClickHouse"
         expr: sum(increase(tokenmeter_clickhouse_insert_failures_total{reason="refused"}[30m])) > 0

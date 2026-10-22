@@ -11,6 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
 )
@@ -18,76 +19,84 @@ import (
 // Registry holds only tokenmeter's metrics plus the Go and process ones.
 var Registry = prometheus.NewRegistry()
 
+var factory = promauto.With(Registry)
+
 var (
-	Events = promauto(prometheus.NewCounterVec(prometheus.CounterOpts{
+	Events = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "tokenmeter_events_total",
 		Help: "Usage events received, by result: created, duplicate or invalid.",
-	}, []string{"result"}))
+	}, []string{"result"})
 
-	Requests = promauto(prometheus.NewCounterVec(prometheus.CounterOpts{
+	Requests = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "tokenmeter_requests_total",
 		Help: "API requests by transport (http, grpc), route or RPC, and status code.",
-	}, []string{"transport", "route", "code"}))
+	}, []string{"transport", "route", "code"})
 
-	RequestDuration = promauto(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	RequestDuration = factory.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "tokenmeter_request_duration_seconds",
 		Help:    "API request duration by transport and route or RPC.",
 		Buckets: []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
-	}, []string{"transport", "route"}))
+	}, []string{"transport", "route"})
 
-	StorageErrors = promauto(prometheus.NewCounterVec(prometheus.CounterOpts{
+	StorageErrors = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "tokenmeter_storage_errors_total",
 		Help: "Failed storage operations by store (postgres, clickhouse) and operation.",
-	}, []string{"store", "op"}))
+	}, []string{"store", "op"})
 
-	ReadFallbacks = promauto(prometheus.NewCounter(prometheus.CounterOpts{
+	ReadFallbacks = factory.NewCounter(prometheus.CounterOpts{
 		Name: "tokenmeter_read_fallbacks_total",
 		Help: "Reports answered from Postgres because a ClickHouse query failed.",
-	}))
+	})
 
-	ClickHouseEnabled = promauto(prometheus.NewGauge(prometheus.GaugeOpts{
+	ClickHouseEnabled = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "tokenmeter_clickhouse_enabled",
 		Help: "1 when CLICKHOUSE_ENABLED is set.",
-	}))
+	})
 
-	ClickHouseUp = promauto(prometheus.NewGauge(prometheus.GaugeOpts{
+	ClickHouseUp = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "tokenmeter_clickhouse_serving",
-		Help: "1 while reports are served from ClickHouse, 0 while from Postgres.",
-	}))
+		Help: "1 while reports are served from ClickHouse, 0 while from Postgres (not connected, backfilling, or its last query failed).",
+	})
 
-	Copied = promauto(prometheus.NewCounter(prometheus.CounterOpts{
+	Copied = factory.NewCounter(prometheus.CounterOpts{
 		Name: "tokenmeter_clickhouse_copied_events_total",
 		Help: "Events copied from the outbox to ClickHouse.",
-	}))
+	})
 
-	InsertFailures = promauto(prometheus.NewCounterVec(prometheus.CounterOpts{
+	InsertFailures = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "tokenmeter_clickhouse_insert_failures_total",
 		Help: "Failed ClickHouse inserts, by reason: unreachable (retried) or refused (postponed).",
-	}, []string{"reason"}))
+	}, []string{"reason"})
 
-	OutboxEvents = promauto(prometheus.NewGauge(prometheus.GaugeOpts{
+	OutboxEvents = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "tokenmeter_clickhouse_outbox_events",
-		Help: "Events waiting in the outbox for ClickHouse.",
-	}))
+		Help: "Events waiting in the outbox for ClickHouse, counted up to 1000000.",
+	})
 
-	OutboxOldest = promauto(prometheus.NewGauge(prometheus.GaugeOpts{
+	OutboxOldest = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "tokenmeter_clickhouse_outbox_oldest_seconds",
 		Help: "Age of the oldest event waiting for ClickHouse; 0 when none waits.",
-	}))
+	})
 
-	BuildInfo = promauto(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	BuildInfo = factory.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "tokenmeter_build_info",
 		Help: "Always 1; the version label names the running release.",
-	}, []string{"version"}))
+	}, []string{"version"})
 )
 
 func init() {
 	Registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-}
-
-func promauto[C prometheus.Collector](c C) C {
-	Registry.MustRegister(c)
-	return c
+	// Series exist at 0 from the start, so rate() and increase() see the first event.
+	for _, r := range []string{"created", "duplicate", "invalid"} {
+		Events.WithLabelValues(r)
+	}
+	for _, r := range []string{"unreachable", "refused"} {
+		InsertFailures.WithLabelValues(r)
+	}
+	for _, so := range [][2]string{{"postgres", "insert"}, {"postgres", "summary"}, {"postgres", "usage_by_meta"},
+		{"postgres", "outbox_claim"}, {"postgres", "outbox_backlog"}, {"clickhouse", "summary"}, {"clickhouse", "usage_by_meta"}} {
+		StorageErrors.WithLabelValues(so[0], so[1])
+	}
 }
 
 // Serve exposes /metrics and /healthz on addr until ctx ends; "" disables it.

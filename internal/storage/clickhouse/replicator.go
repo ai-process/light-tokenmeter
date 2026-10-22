@@ -146,7 +146,6 @@ func (r *Replicator) copyBatch() bool {
 			return false
 		}
 	}
-	metrics.Copied.Add(float64(len(events)))
 	// Not r.ctx: a Close right after the insert must still record it.
 	ackCtx, cancel := context.WithTimeout(context.Background(), ackTimeout)
 	defer cancel()
@@ -154,6 +153,7 @@ func (r *Replicator) copyBatch() bool {
 		log.Error().Err(err).Msg("clickhouse replicator: cannot acknowledge a copied batch; ClickHouse skips it when retried")
 		return false
 	}
+	metrics.Copied.Add(float64(len(events))) // after the ack, so a retried batch counts once
 	return true
 }
 

@@ -44,8 +44,9 @@ func NewHTTPServerWithService(usageService *service.UsageService, repo *reposito
 
 	// Health endpoints
 	route := func(pattern string, h http.Handler) { mux.Handle(pattern, instrument(pattern, h)) }
-	route("GET /healthz", http.HandlerFunc(s.handleHealthz))
-	route("GET /readyz", http.HandlerFunc(s.handleReadyz))
+	// Probes are not API traffic and stay out of the request metrics.
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 
 	// Usage API endpoints
 	require := func(scope auth.Scope, h http.HandlerFunc) http.Handler {
@@ -230,6 +231,7 @@ func (s *HTTPServer) handleRecordEvents(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if len(req.Events) > domain.MaxBatchSize {
+		metrics.Events.WithLabelValues("invalid").Add(float64(len(req.Events)))
 		writeError(w, http.StatusBadRequest, "validation_error", fmt.Sprintf("Batch size exceeds maximum of %d events", domain.MaxBatchSize), "")
 		return
 	}

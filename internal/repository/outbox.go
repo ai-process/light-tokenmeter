@@ -157,15 +157,17 @@ func (r *Repository) RetryOutboxLater(ctx context.Context, owner, batch uuid.UUI
 	return tag.RowsAffected() > 0, nil
 }
 
-// OutboxBacklog reports how many events wait for ClickHouse and the age of
-// the oldest, zero when none wait.
+// OutboxBacklog reports how many events wait for ClickHouse, counted up to
+// a million so a large backlog stays cheap to sample, and the age of the oldest.
 func (r *Repository) OutboxBacklog(ctx context.Context) (int64, time.Duration, error) {
 	var (
 		n     int64
 		since *time.Time
 		now   time.Time
 	)
-	err := r.pool.QueryRow(ctx, `SELECT count(*), min(enqueued_at), now() FROM clickhouse_outbox`).Scan(&n, &since, &now)
+	err := r.pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM (SELECT 1 FROM clickhouse_outbox LIMIT 1000000) c),
+			(SELECT enqueued_at FROM clickhouse_outbox ORDER BY enqueued_at LIMIT 1), now()`).Scan(&n, &since, &now)
 	if err != nil {
 		return 0, 0, fmt.Errorf("outbox backlog: %w", err)
 	}

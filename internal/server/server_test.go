@@ -270,13 +270,25 @@ func TestHTTPServer_BodyLimit(t *testing.T) {
 
 func TestRequestAndEventMetrics(t *testing.T) {
 	h := NewHTTPServer(nil, ":0").server.Handler
-	health := metrics.Requests.WithLabelValues("http", "GET /healthz", "200")
-	before := testutil.ToFloat64(health)
+	probeSeries := func() int {
+		n := 0
+		mfs, err := metrics.Registry.Gather()
+		require.NoError(t, err)
+		for _, mf := range mfs {
+			for _, m := range mf.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == "route" && (strings.Contains(l.GetValue(), "healthz") || strings.Contains(l.GetValue(), "readyz") || strings.Contains(l.GetValue(), "grpc.health")) {
+						n++
+					}
+				}
+			}
+		}
+		return n
+	}
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	assert.Equal(t, before+1, testutil.ToFloat64(health))
 
 	invalid := metrics.Events.WithLabelValues("invalid")
-	before = testutil.ToFloat64(invalid)
+	before := testutil.ToFloat64(invalid)
 	body, _ := json.Marshal(recordEventsRequest{Events: []recordEventRequest{{EventID: "x"}, {EventID: "y"}, {EventID: "z"}}})
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/usage/events:batch", bytes.NewReader(body)))
@@ -293,6 +305,9 @@ func TestRequestAndEventMetrics(t *testing.T) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
+	_, err = healthpb.NewHealthClient(conn).Check(context.Background(), &healthpb.HealthCheckRequest{})
+	require.NoError(t, err)
+	assert.Zero(t, probeSeries(), "probes are not API traffic")
 	refused := metrics.Requests.WithLabelValues("grpc", pb.UsageService_RecordUsageEvents_FullMethodName, "Unauthenticated")
 	before = testutil.ToFloat64(refused)
 	_, err = pb.NewUsageServiceClient(conn).RecordUsageEvents(context.Background(), &pb.RecordUsageEventsRequest{})

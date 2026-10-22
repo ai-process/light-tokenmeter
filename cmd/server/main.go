@@ -58,6 +58,15 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Before migrations, which can be long: a scrape must not see the service down.
+	metrics.BuildInfo.WithLabelValues(version).Set(1)
+	if cfg.ClickHouseEnabled {
+		metrics.ClickHouseEnabled.Set(1)
+	}
+	if err := metrics.Serve(ctx, cfg.MetricsAddr); err != nil {
+		log.Fatal().Err(err).Str("addr", cfg.MetricsAddr).Msg("failed to start the metrics server")
+	}
+
 	// Run database migrations
 	if err := database.RunMigrations(ctx, cfg.DatabaseURL); err != nil {
 		log.Fatal().Err(err).Msg("failed to run database migrations")
@@ -95,12 +104,7 @@ func main() {
 		ch = startClickHouse(ctx, cfg, repo, usageSvc)
 	}
 
-	metrics.BuildInfo.WithLabelValues(version).Set(1)
-	if err := metrics.Serve(ctx, cfg.MetricsAddr); err != nil {
-		log.Fatal().Err(err).Str("addr", cfg.MetricsAddr).Msg("failed to start the metrics server")
-	}
 	if cfg.ClickHouseEnabled {
-		metrics.ClickHouseEnabled.Set(1)
 		go metrics.WatchOutbox(ctx, repo.OutboxBacklog, 15*time.Second)
 	}
 
