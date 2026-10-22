@@ -26,6 +26,7 @@ who is worthy.
 - [Sending events](#sending-events)
 - [Finding the greedy and the worthy](#finding-the-greedy-and-the-worthy)
 - [API reference](#api-reference)
+- [API stability](#api-stability)
 - [Configuration](#configuration)
 - [Security](#security)
 - [Operations](#operations)
@@ -221,8 +222,9 @@ gRPC reflection is on, so `grpcurl` needs no `.proto` files (with auth on, pass 
 | `GET` | `/healthz` | Liveness. |
 | `GET` | `/readyz` | Readiness (database ping). |
 
-Errors are JSON with a `code` (`validation_error`, `internal_error`, `unauthenticated`,
-`forbidden`) and a message. Usage routes need a bearer token when auth is on, see
+Errors are JSON `{"error": "<message>", "code": "<code>", "details": "<optional>"}`, with code
+`invalid_json` or `validation_error` (400), `unauthenticated` (401), `forbidden` (403) or
+`internal_error` (500). Usage routes need a bearer token when auth is on, see
 [Authentication](#authentication).
 
 ### gRPC (`:9090`)
@@ -230,6 +232,33 @@ Errors are JSON with a `code` (`validation_error`, `internal_error`, `unauthenti
 `usage.v1.UsageService`, defined in [`proto/usage/v1/usage.proto`](proto/usage/v1/usage.proto):
 `RecordUsageEvent`, `RecordUsageEvents`, `GetUsageSummary`, `GetUsageByMeta`. Go stubs live in
 [`gen/usage/v1`](gen/usage/v1) (`github.com/ai-process/light-tokenmeter/gen/usage/v1`).
+Invalid input is `INVALID_ARGUMENT`; a refused batch names the first bad event as
+`invalid event at index N: …`, so a client can drop that event and resend the rest.
+
+## API stability
+
+From 1.0, light-tokenmeter follows [semantic versioning](https://semver.org): within 1.x nothing
+below changes incompatibly. Breaking changes wait for 2.0. Minor releases add features; patch
+releases fix bugs.
+
+### What is public
+
+| Surface | What stays compatible in 1.x |
+| --- | --- |
+| gRPC `usage.v1` (`UsageService`) | No RPC, field, enum value or message is removed or renamed, and no field number or type changes. New RPCs and fields may appear. `buf breaking` checks every pull request. |
+| HTTP `/v1/usage/*` | Paths, query parameters, request and response fields of the [events](#sending-events) and [summary](#finding-the-greedy-and-the-worthy) endpoints. New fields and parameters may appear, so ignore unknown fields. |
+| Errors | HTTP status codes and `code` values above; gRPC status codes and the `invalid event at index N` message prefix. New codes may appear, so treat an unknown one like its status. |
+| Authentication | `Authorization: Bearer`, the `write` and `read` scopes and the `TOKENMETER_TOKENS` entry format, see [Authentication](#authentication). |
+| Probes | `/healthz` and `/readyz`, their status codes and the `status` and `clickhouse` fields. |
+| Environment variables | Names, defaults and meaning of every variable in [Configuration](#configuration). |
+| Storage | Any 1.x release upgrades the Postgres and ClickHouse schemas of an earlier one by itself at startup, with no manual steps. The tables are not an API, except as the recipes in this README use them. |
+| Limits | Up to 500 events per batch; field lengths in [Sending events](#sending-events) never shrink. |
+
+Not public, and free to change in any release: log message text, the `internal/` Go packages,
+the outbox's batch sizes and retry timings, and resource numbers.
+
+Nothing is experimental in 1.0. KTMS keeps a copy of `usage.proto` for its usage reports; its CI
+fails when the copy differs from this repository's.
 
 ## Configuration
 

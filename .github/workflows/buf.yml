@@ -1,0 +1,36 @@
+name: Buf
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  buf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+
+      - name: Lint
+        run: buf lint
+
+      # usage.v1 is frozen for 1.x (README "API stability"): each PR is checked
+      # against its base, so a break fails the PR that makes it.
+      - name: Breaking changes
+        if: github.event_name == 'pull_request'
+        run: buf breaking --against ".git#ref=origin/${{ github.base_ref }}"
+
+      - name: Generated code matches proto/
+        run: |
+          buf generate
+          git diff --exit-code -- gen/ || { echo "gen/ is stale: run make proto and commit"; exit 1; }
