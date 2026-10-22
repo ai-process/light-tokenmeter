@@ -206,7 +206,8 @@ grpcurl -plaintext -d '{"meta_key":"job_id","meta_value":"job-42","group_by_meta
   localhost:9090 usage.v1.UsageService/GetUsageByMeta
 ```
 
-gRPC reflection is on, so `grpcurl` needs no `.proto` files.
+gRPC reflection is on, so `grpcurl` needs no `.proto` files (with auth on, pass a token with
+`-H 'authorization: Bearer …'`).
 
 ## API reference
 
@@ -220,7 +221,9 @@ gRPC reflection is on, so `grpcurl` needs no `.proto` files.
 | `GET` | `/healthz` | Liveness. |
 | `GET` | `/readyz` | Readiness (database ping). |
 
-Errors are JSON with a `validation_error` or `internal_error` code and a message.
+Errors are JSON with a `code` (`validation_error`, `internal_error`, `unauthenticated`,
+`forbidden`) and a message. Usage routes need a bearer token when auth is on, see
+[Authentication](#authentication).
 
 ### gRPC (`:9090`)
 
@@ -241,6 +244,8 @@ Environment variables (see [`env.example`](env.example)):
 | `LOG_FORMAT` | `json` | Log format: `json` (structured JSON on stdout) or `console` (colored human-readable). |
 | `SHUTDOWN_TIMEOUT` | `30s` | Graceful shutdown window. |
 | `DB_MAX_CONNS` / `DB_MIN_CONNS` | `25` / `5` | Connection pool bounds per replica. |
+| `TOKENMETER_TOKENS` | empty | Accepted tokens as `name:scope[+scope]:sha256hex`, comma-separated; see [Authentication](#authentication). Empty, with no file, turns auth off. |
+| `TOKENMETER_TOKENS_FILE` | empty | A file of the same entries, one per line, added to `TOKENMETER_TOKENS`; for a mounted secret. |
 | `SENTRY_DSN` | empty | Error reporting; empty disables it. |
 | `SENTRY_ENVIRONMENT` / `SENTRY_RELEASE` | `development` / empty | Sentry metadata. |
 | `SENTRY_ENABLE_TRACING` | `false` | Sentry performance tracing. |
@@ -256,11 +261,58 @@ Environment variables (see [`env.example`](env.example)):
 
 ## Security
 
-**There is no authentication.** Anyone who can reach the ports can write and read usage data.
-Run it on a private network, or put it behind a reverse proxy or API gateway that enforces
-auth and TLS (Envoy, nginx, Caddy, a service mesh). Do not publish ports 8080/9090 on a
-public interface. Events can contain whatever you put in `user_id` and `meta`; avoid personal
-data you would not want in a database.
+### Authentication
+
+Every usage call needs a bearer token once `TOKENMETER_TOKENS` (or `TOKENMETER_TOKENS_FILE`)
+lists at least one. A token has one or both scopes:
+
+| Scope | Allows |
+| --- | --- |
+| `write` | `POST /v1/usage/events`, `POST /v1/usage/events:batch`, `RecordUsageEvent`, `RecordUsageEvents` |
+| `read` | `GET /v1/usage/summary`, `GetUsageSummary`, `GetUsageByMeta` |
+
+`/healthz`, `/readyz` and gRPC health (`grpc.health.v1.Health`, a liveness check) never need a
+token. gRPC reflection accepts any configured token, so `grpcurl` works with `-H` below.
+
+The service stores only SHA-256 hashes. Each entry is `name:scope[+scope]:sha256hex`; entries
+are separated by commas or newlines, and in a file `#` starts a comment:
+
+```bash
+TOKEN=$(openssl rand -hex 32)                  # give this to the client
+printf %s "$TOKEN" | sha256sum | cut -d' ' -f1 # put this in the config
+TOKENMETER_TOKENS="ktms:write:<hash>,console:read:<hash>"
+```
+
+Clients send `Authorization: Bearer <token>`, as an HTTP header or as gRPC metadata:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" 'localhost:8080/v1/usage/summary?from=…&to=…'
+grpcurl -plaintext -H "authorization: Bearer $TOKEN" localhost:9090 usage.v1.UsageService/GetUsageSummary
+```
+
+| Problem | HTTP | gRPC |
+| --- | --- | --- |
+| No token, or an unknown one | `401` `unauthenticated` with `WWW-Authenticate: Bearer` | `UNAUTHENTICATED` |
+| The token lacks the scope | `403` `forbidden` | `PERMISSION_DENIED` |
+
+**Rotation without downtime**: add the new token's entry next to the old one and restart (or
+roll) the service, switch the clients to the new token, then remove the old entry. Any number of
+entries may be active at once, each token in one entry only. With `LOG_LEVEL=debug` every
+accepted call logs the token's name, so you can see when the old one stops being used; refused
+calls are logged at `warn`.
+
+A `TOKENMETER_TOKENS_FILE` that is missing, malformed or holds no tokens stops the service at
+startup rather than turning auth off.
+
+With no tokens configured the service logs a warning at startup and lets every call in. Use that
+only on a private network you trust.
+
+### Transport and data
+
+The service speaks plain HTTP and gRPC, so a token crosses the network in the clear. Outside a
+private network, terminate TLS in front of it (Envoy, nginx, Caddy, a service mesh), and do not
+publish ports 8080/9090 on a public interface. Events can contain whatever you put in `user_id`
+and `meta`; avoid personal data you would not want in a database.
 
 ## Operations
 

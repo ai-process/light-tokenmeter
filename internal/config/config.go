@@ -17,6 +17,10 @@ type Config struct {
 	DBMaxConns      int32
 	DBMinConns      int32
 
+	// Auth: entries name:scope[+scope]:sha256hex, inline or in a file.
+	Tokens     string
+	TokensFile string
+
 	// ClickHouse
 	ClickHouseEnabled       bool
 	ClickHouseAddr          string
@@ -46,6 +50,8 @@ func Load() *Config {
 		ShutdownTimeout:         getDurationEnv("SHUTDOWN_TIMEOUT", 30*time.Second),
 		DBMaxConns:              int32(getIntEnv("DB_MAX_CONNS", 25)),
 		DBMinConns:              int32(getIntEnv("DB_MIN_CONNS", 5)),
+		Tokens:                  getEnv("TOKENMETER_TOKENS", ""),
+		TokensFile:              getEnv("TOKENMETER_TOKENS_FILE", ""),
 		ClickHouseEnabled:       getBoolEnv("CLICKHOUSE_ENABLED", false),
 		ClickHouseAddr:          getEnv("CLICKHOUSE_ADDR", "localhost:9000"),
 		ClickHouseDatabase:      getEnv("CLICKHOUSE_DATABASE", "tokenmeter"),

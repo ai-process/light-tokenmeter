@@ -8,10 +8,13 @@ import (
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/ai-process/light-tokenmeter/internal/auth"
 	"github.com/ai-process/light-tokenmeter/internal/domain"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 	"github.com/ai-process/light-tokenmeter/internal/service"
@@ -29,13 +32,24 @@ type GRPCServer struct {
 
 // NewGRPCServer creates a new gRPC server with a repository.
 func NewGRPCServer(repo *repository.Repository, addr string) *GRPCServer {
-	return NewGRPCServerWithService(service.NewUsageService(repo), addr)
+	return NewGRPCServerWithService(service.NewUsageService(repo), addr, nil)
 }
 
-// NewGRPCServerWithService creates a new gRPC server with an existing usage service.
-func NewGRPCServerWithService(usageService *service.UsageService, addr string) *GRPCServer {
+// grpcScopes lists every UsageService RPC; one missing here is refused.
+var grpcScopes = map[string]auth.Scope{
+	pb.UsageService_RecordUsageEvent_FullMethodName:  auth.Write,
+	pb.UsageService_RecordUsageEvents_FullMethodName: auth.Write,
+	pb.UsageService_GetUsageSummary_FullMethodName:   auth.Read,
+	pb.UsageService_GetUsageByMeta_FullMethodName:    auth.Read,
+}
+
+// NewGRPCServerWithService creates a new gRPC server with an existing usage
+// service. A nil or empty verifier serves without authentication.
+func NewGRPCServerWithService(usageService *service.UsageService, addr string, verifier *auth.Verifier) *GRPCServer {
 	srv := grpc.NewServer(
-		grpc.UnaryInterceptor(loggingInterceptor),
+		// Auth runs first, so refusals are logged at Warn rather than as errors.
+		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(verifier, grpcScopes), loggingInterceptor),
+		grpc.StreamInterceptor(auth.StreamInterceptor(verifier)),
 	)
 
 	grpcServer := &GRPCServer{
@@ -45,6 +59,7 @@ func NewGRPCServerWithService(usageService *service.UsageService, addr string) *
 	}
 
 	pb.RegisterUsageServiceServer(srv, grpcServer)
+	healthpb.RegisterHealthServer(srv, health.NewServer())
 	reflection.Register(srv)
 
 	return grpcServer
