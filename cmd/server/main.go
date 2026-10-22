@@ -76,7 +76,7 @@ func main() {
 	usageSvc := service.NewUsageService(repo)
 
 	var chClient *clickhouse.Client
-	var chWriter *clickhouse.BatchWriter
+	var chReplicator *clickhouse.Replicator
 
 	if cfg.ClickHouseEnabled {
 		log.Info().
@@ -103,10 +103,13 @@ func main() {
 			log.Fatal().Err(err).Msg("failed to run ClickHouse migrations")
 		}
 
-		chWriter = clickhouse.NewBatchWriter(chClient.Conn(), cfg.ClickHouseBatchSize, cfg.ClickHouseFlushInterval)
-		chWriter.Start()
+		// Events reach ClickHouse through the Postgres outbox, so none is lost
+		// to a full buffer, a ClickHouse outage or a restart.
+		repo.WithOutbox()
+		chReplicator = clickhouse.NewReplicator(repo, chClient.Conn(), cfg.ClickHouseBatchSize, cfg.ClickHouseFlushInterval)
+		chReplicator.Start()
 
-		usageSvc = usageSvc.WithAnalytics(chClient).WithEventSink(chWriter)
+		usageSvc = usageSvc.WithAnalytics(chClient)
 	}
 
 	// Create servers
@@ -155,11 +158,9 @@ func main() {
 		log.Error().Err(err).Msg("HTTP server shutdown error")
 	}
 
-	// Flush and close ClickHouse batch writer and client
-	if chWriter != nil {
-		if err := chWriter.Close(); err != nil {
-			log.Error().Err(err).Msg("ClickHouse batch writer close error")
-		}
+	// Events not yet copied stay in the outbox for the next start.
+	if chReplicator != nil {
+		chReplicator.Close()
 	}
 	if chClient != nil {
 		if err := chClient.Close(); err != nil {

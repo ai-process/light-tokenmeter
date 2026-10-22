@@ -14,14 +14,6 @@ import (
 	"github.com/ai-process/light-tokenmeter/internal/testdb"
 )
 
-type mockSink struct {
-	events []*domain.UsageEvent
-}
-
-func (m *mockSink) Enqueue(events ...*domain.UsageEvent) {
-	m.events = append(m.events, events...)
-}
-
 type mockAnalytics struct {
 	summaryCalled bool
 	metaCalled    bool
@@ -86,22 +78,14 @@ func TestUsageService_AnalyticsDelegation(t *testing.T) {
 	assert.Equal(t, int64(500), metaRows[0].TokensTotal)
 }
 
-func TestUsageService_EventSinkConfiguration(t *testing.T) {
-	sink := &mockSink{}
-	svc := NewUsageService(nil).WithEventSink(sink)
-
-	assert.Equal(t, sink, svc.sink)
-}
-
 // A batch sent again (the client lost the reply and retried) must not reach
-// the analytics sink twice: ClickHouse would count its tokens and cost twice.
-func TestRecordEventsFeedsSinkOnlyNewEvents(t *testing.T) {
+// the ClickHouse outbox twice: ClickHouse would count its tokens and cost twice.
+func TestRecordEventsQueuesOnlyNewEventsForClickHouse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	pool := testdb.Postgres(t)
 
-	sink := &mockSink{}
-	svc := NewUsageService(repository.New(pool)).WithEventSink(sink)
+	svc := NewUsageService(repository.New(pool).WithOutbox())
 	ev := &domain.UsageEvent{
 		EventID: uuid.New(), OccurredAt: ptrTime(time.Now()), UserID: "u", ProjectID: "p", ActionID: "a",
 		Vendor: "openai", Model: "m", Status: domain.StatusSuccess, TokensInput: 1, TokensOutput: 1, TokensTotal: 2,
@@ -112,7 +96,13 @@ func TestRecordEventsFeedsSinkOnlyNewEvents(t *testing.T) {
 	require.Equal(t, 1, dups)
 	_, _, err = svc.RecordEvents(ctx, []*domain.UsageEvent{ev})
 	require.NoError(t, err)
-	require.Len(t, sink.events, 1, "the sink must see the event once")
+	created1, err := svc.RecordEvent(ctx, ev)
+	require.NoError(t, err)
+	require.False(t, created1)
+
+	var queued int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM clickhouse_outbox").Scan(&queued))
+	require.Equal(t, 1, queued, "the outbox must hold the event once")
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }

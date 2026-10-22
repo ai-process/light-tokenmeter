@@ -97,9 +97,6 @@ func TestClickHouse_CostAggregation(t *testing.T) {
 	client := getTestClient(t)
 	ctx := context.Background()
 
-	writer := NewBatchWriter(client.Conn(), 100, time.Hour)
-	writer.Start()
-
 	newEvent := func(model string, cost int64) *domain.UsageEvent {
 		return &domain.UsageEvent{
 			EventID:      uuid.New(),
@@ -116,12 +113,12 @@ func TestClickHouse_CostAggregation(t *testing.T) {
 			CostNanoUSD:  cost,
 		}
 	}
-	writer.Enqueue(
+	r := NewReplicator(nil, client.Conn(), 100, time.Hour)
+	require.NoError(t, r.insert(ctx, uuid.New(), []*domain.UsageEvent{
 		newEvent("gpt-4o", 1_000_000),
 		newEvent("gpt-4o", 2_000_000),
 		newEvent("gpt-4o-mini", 150_000),
-	)
-	require.NoError(t, writer.Close())
+	}))
 
 	now := time.Now().UTC()
 	summary, _, err := client.QuerySummary(ctx, domain.SummaryParams{

@@ -16,16 +16,10 @@ type AnalyticsReader interface {
 	Ping(ctx context.Context) error
 }
 
-// EventSink receives recorded usage events for downstream processing or storage.
-type EventSink interface {
-	Enqueue(events ...*domain.UsageEvent)
-}
-
 // UsageService handles business logic for usage events
 type UsageService struct {
 	repo      *repository.Repository
 	analytics AnalyticsReader
-	sink      EventSink
 }
 
 // NewUsageService creates a new usage service
@@ -36,12 +30,6 @@ func NewUsageService(repo *repository.Repository) *UsageService {
 // WithAnalytics configures an analytical engine (e.g., ClickHouse).
 func (s *UsageService) WithAnalytics(r AnalyticsReader) *UsageService {
 	s.analytics = r
-	return s
-}
-
-// WithEventSink configures an async downstream sink (e.g., ClickHouse BatchWriter).
-func (s *UsageService) WithEventSink(sink EventSink) *UsageService {
-	s.sink = sink
 	return s
 }
 
@@ -58,9 +46,6 @@ func (s *UsageService) RecordEvent(ctx context.Context, event *domain.UsageEvent
 	}
 
 	if created {
-		if s.sink != nil {
-			s.sink.Enqueue(event)
-		}
 		log.Debug().
 			Str("event_id", event.EventID.String()).
 			Str("project_id", event.ProjectID).
@@ -84,19 +69,6 @@ func (s *UsageService) RecordEvents(ctx context.Context, events []*domain.UsageE
 		return 0, 0, err
 	}
 	created, duplicates = len(inserted), len(events)-len(inserted)
-
-	// Only new events reach the sink, as on the single-event path: a retried
-	// batch must not count twice in analytics (ClickHouse does not deduplicate).
-	if s.sink != nil && created > 0 {
-		fresh := make([]*domain.UsageEvent, 0, created)
-		for _, e := range events {
-			if _, ok := inserted[e.EventID]; ok {
-				fresh = append(fresh, e)
-				delete(inserted, e.EventID) // an ID repeated within the batch goes out once
-			}
-		}
-		s.sink.Enqueue(fresh...)
-	}
 
 	log.Debug().
 		Int("created", created).
