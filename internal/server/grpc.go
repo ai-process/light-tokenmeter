@@ -8,6 +8,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -45,7 +47,8 @@ var grpcScopes = map[string]auth.Scope{
 // service. A nil or empty verifier serves without authentication.
 func NewGRPCServerWithService(usageService *service.UsageService, addr string, verifier *auth.Verifier) *GRPCServer {
 	srv := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(loggingInterceptor, auth.UnaryInterceptor(verifier, grpcScopes)),
+		// Auth runs first, so refusals are logged at Warn rather than as errors.
+		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(verifier, grpcScopes), loggingInterceptor),
 		grpc.StreamInterceptor(auth.StreamInterceptor(verifier)),
 	)
 
@@ -56,6 +59,7 @@ func NewGRPCServerWithService(usageService *service.UsageService, addr string, v
 	}
 
 	pb.RegisterUsageServiceServer(srv, grpcServer)
+	healthpb.RegisterHealthServer(srv, health.NewServer())
 	reflection.Register(srv)
 
 	return grpcServer

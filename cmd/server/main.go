@@ -43,7 +43,7 @@ func main() {
 
 	verifier, err := auth.Load(cfg.Tokens, cfg.TokensFile)
 	if err != nil {
-		log.Fatal().Err(err).Msg("invalid TOKENMETER_TOKENS")
+		log.Fatal().Err(err).Msg("invalid token configuration")
 	}
 	if !verifier.Enabled() {
 		log.Warn().Msg("TOKENMETER_TOKENS is empty: authentication is off and anyone who reaches the ports can write and read usage")

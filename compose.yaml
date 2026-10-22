@@ -53,6 +53,8 @@ services:
       CLICKHOUSE_PASSWORD: tokenmeter
       CLICKHOUSE_BATCH_SIZE: "5000"
       CLICKHOUSE_FLUSH_INTERVAL: "1s"
+      # Empty runs without auth; set it in .env or the shell, see README "Authentication".
+      TOKENMETER_TOKENS: ${TOKENMETER_TOKENS:-}
     ports:
       - "8080:8080" # HTTP
       - "9090:9090" # gRPC

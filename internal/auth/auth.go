@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -41,53 +42,81 @@ type Verifier struct {
 	byHash map[[sha256.Size]byte]token
 }
 
-// Parse reads comma- or newline-separated entries name:scope[+scope]:sha256hex,
-// for example "ktms:write:9f86d0…,console:read:…". Several entries may share a
-// name, which is how a token is rotated without downtime.
+// Parse reads entries name:scope[+scope]:sha256hex, separated by commas or
+// newlines, for example "ktms:write:9f86d0…,console:read:…". A line starting
+// with # is a comment. Several entries may be active at once for rotation.
 func Parse(spec string) (*Verifier, error) {
 	v := &Verifier{byHash: map[[sha256.Size]byte]token{}}
-	for i, entry := range strings.FieldsFunc(spec, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' }) {
-		entry = strings.TrimSpace(entry)
-		if entry == "" || strings.HasPrefix(entry, "#") {
+	n := 0
+	for _, line := range strings.Split(spec, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
 			continue
 		}
-		parts := strings.Split(entry, ":")
-		if len(parts) != 3 || parts[0] == "" {
-			// The entry may be a pasted raw token, so only its position is shown.
-			return nil, fmt.Errorf("token entry %d: want name:scope[+scope]:sha256hex", i+1)
-		}
-		sum, err := hex.DecodeString(parts[2])
-		if err != nil || len(sum) != sha256.Size {
-			return nil, fmt.Errorf("token %q: the third field must be the token's SHA-256 in hex (64 characters), not the token", parts[0])
-		}
-		t := token{name: parts[0], scopes: map[Scope]bool{}}
-		for _, s := range strings.Split(parts[1], "+") {
-			switch Scope(s) {
-			case Write, Read:
-				t.scopes[Scope(s)] = true
-			default:
-				return nil, fmt.Errorf("token %q: unknown scope %q (want write, read or write+read)", parts[0], s)
+		for _, entry := range strings.Split(line, ",") {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
 			}
+			n++
+			// Errors name the entry by position only: a mistyped entry may hold a raw token.
+			parts := strings.Split(entry, ":")
+			if len(parts) != 3 || parts[0] == "" {
+				return nil, fmt.Errorf("token entry %d: want name:scope[+scope]:sha256hex", n)
+			}
+			sum, err := hex.DecodeString(parts[2])
+			if err != nil || len(sum) != sha256.Size {
+				return nil, fmt.Errorf("token entry %d: the third field must be the token's SHA-256 in hex (64 characters), not the token", n)
+			}
+			t := token{name: parts[0], scopes: map[Scope]bool{}}
+			for _, sc := range strings.Split(parts[1], "+") {
+				switch Scope(sc) {
+				case Write, Read:
+					t.scopes[Scope(sc)] = true
+				default:
+					return nil, fmt.Errorf("token entry %d: unknown scope (want write, read or write+read)", n)
+				}
+			}
+			var key [sha256.Size]byte
+			copy(key[:], sum)
+			if _, dup := v.byHash[key]; dup {
+				return nil, fmt.Errorf("token entry %d: the same token is listed twice; give it one entry with write+read", n)
+			}
+			v.byHash[key] = t
 		}
-		var key [sha256.Size]byte
-		copy(key[:], sum)
-		v.byHash[key] = t
 	}
 	return v, nil
 }
 
-// Load combines inline entries with those in file (one per line, # starts
-// a comment), so a token can live in a mounted secret.
+// Load combines inline entries with those in file, so a token can live in a
+// mounted secret. A file that yields no tokens is an error: naming one means
+// auth was meant to be on.
 func Load(inline, file string) (*Verifier, error) {
-	spec := inline
-	if file != "" {
-		b, err := os.ReadFile(file)
-		if err != nil {
-			return nil, fmt.Errorf("read tokens file: %w", err)
-		}
-		spec += "\n" + string(b)
+	v, err := Parse(inline)
+	if err != nil {
+		return nil, fmt.Errorf("TOKENMETER_TOKENS: %w", err)
 	}
-	return Parse(spec)
+	if file == "" {
+		return v, nil
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("TOKENMETER_TOKENS_FILE: %w", err)
+	}
+	fromFile, err := Parse(string(b))
+	if err != nil {
+		return nil, fmt.Errorf("TOKENMETER_TOKENS_FILE %s: %w", file, err)
+	}
+	if !fromFile.Enabled() {
+		return nil, fmt.Errorf("TOKENMETER_TOKENS_FILE %s holds no tokens", file)
+	}
+	for key, t := range fromFile.byHash {
+		if _, dup := v.byHash[key]; dup {
+			return nil, fmt.Errorf("token %q is listed in both TOKENMETER_TOKENS and TOKENMETER_TOKENS_FILE", t.name)
+		}
+		v.byHash[key] = t
+	}
+	return v, nil
 }
 
 // Enabled reports whether any token is configured.
@@ -111,6 +140,18 @@ func (v *Verifier) Check(bearer string, scope Scope) (string, error) {
 	return t.name, nil
 }
 
+// Known returns the token's name when bearer is any configured token.
+func (v *Verifier) Known(bearer string) (string, error) {
+	if !v.Enabled() {
+		return "", nil
+	}
+	t, ok := v.byHash[sha256.Sum256([]byte(bearer))]
+	if bearer == "" || !ok {
+		return "", ErrUnauthenticated
+	}
+	return t.name, nil
+}
+
 func bearer(header string) string {
 	scheme, value, ok := strings.Cut(strings.TrimSpace(header), " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") {
@@ -123,58 +164,84 @@ func bearer(header string) string {
 // refusal in the service's own error shape.
 func Require(v *Verifier, scope Scope, onError func(w http.ResponseWriter, status int, code, message string), next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := v.Check(bearer(r.Header.Get("Authorization")), scope)
+		if !v.Enabled() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		name, err := v.Check(bearer(r.Header.Get("Authorization")), scope)
 		switch {
 		case errors.Is(err, ErrUnauthenticated):
+			logDenied(r.Method+" "+r.URL.Path, name, err)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="light-tokenmeter"`)
 			onError(w, http.StatusUnauthorized, "unauthenticated", "a valid bearer token is required")
 		case errors.Is(err, ErrForbidden):
+			logDenied(r.Method+" "+r.URL.Path, name, err)
 			onError(w, http.StatusForbidden, "forbidden", "the token lacks the "+string(scope)+" scope")
 		default:
+			log.Debug().Str("token", name).Str("path", r.URL.Path).Msg("authenticated")
 			next.ServeHTTP(w, r)
 		}
 	})
 }
 
 // UnaryInterceptor checks the scope each gRPC method needs. A method missing
-// from scopes is refused, so a new RPC cannot ship open by accident; health
-// and reflection stay reachable.
+// from scopes is refused, so a new RPC cannot ship open by accident.
 func UnaryInterceptor(v *Verifier, scopes map[string]Scope) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		if isExempt(info.FullMethod) || !v.Enabled() {
+		if !v.Enabled() || isHealth(info.FullMethod) {
 			return handler(ctx, req)
 		}
 		scope, ok := scopes[info.FullMethod]
 		if !ok {
+			logDenied(info.FullMethod, "", errors.New("no scope configured"))
 			return nil, status.Errorf(codes.PermissionDenied, "no scope is configured for %s", info.FullMethod)
 		}
-		var header string
-		if md, ok := metadata.FromIncomingContext(ctx); ok {
-			if vals := md.Get("authorization"); len(vals) > 0 {
-				header = vals[0]
-			}
-		}
-		switch _, err := v.Check(bearer(header), scope); {
+		name, err := v.Check(bearer(incoming(ctx)), scope)
+		switch {
 		case errors.Is(err, ErrUnauthenticated):
+			logDenied(info.FullMethod, name, err)
 			return nil, status.Error(codes.Unauthenticated, "a valid bearer token is required")
 		case errors.Is(err, ErrForbidden):
+			logDenied(info.FullMethod, name, err)
 			return nil, status.Error(codes.PermissionDenied, "the token lacks the "+string(scope)+" scope")
 		}
+		log.Debug().Str("token", name).Str("method", info.FullMethod).Msg("authenticated")
 		return handler(ctx, req)
 	}
 }
 
-// StreamInterceptor refuses every stream while auth is on: the service has
-// no streaming RPCs, so one can only be reflection, which stays open.
+// StreamInterceptor guards the only streams the server has, health watches
+// and reflection: health is open for probes, reflection needs any token so the
+// schema is not handed to anyone who reaches the port.
 func StreamInterceptor(v *Verifier) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		if isExempt(info.FullMethod) || !v.Enabled() {
+		if !v.Enabled() || isHealth(info.FullMethod) {
 			return handler(srv, ss)
 		}
-		return status.Errorf(codes.PermissionDenied, "no scope is configured for %s", info.FullMethod)
+		if !strings.HasPrefix(info.FullMethod, "/grpc.reflection.") {
+			logDenied(info.FullMethod, "", errors.New("no scope configured"))
+			return status.Errorf(codes.PermissionDenied, "no scope is configured for %s", info.FullMethod)
+		}
+		if _, err := v.Known(bearer(incoming(ss.Context()))); err != nil {
+			logDenied(info.FullMethod, "", err)
+			return status.Error(codes.Unauthenticated, "a valid bearer token is required")
+		}
+		return handler(srv, ss)
 	}
 }
 
-func isExempt(method string) bool {
-	return strings.HasPrefix(method, "/grpc.health.") || strings.HasPrefix(method, "/grpc.reflection.")
+func incoming(ctx context.Context) string {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if vals := md.Get("authorization"); len(vals) > 0 {
+			return vals[0]
+		}
+	}
+	return ""
+}
+
+func isHealth(method string) bool { return strings.HasPrefix(method, "/grpc.health.") }
+
+// logDenied stays at Warn: Error would send every probe of the port to Sentry.
+func logDenied(target, token string, err error) {
+	log.Warn().Str("target", target).Str("token", token).Err(err).Msg("request refused")
 }

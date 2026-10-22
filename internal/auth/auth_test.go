@@ -41,16 +41,23 @@ func TestParse(t *testing.T) {
 	}
 
 	for _, bad := range []string{
-		"ktms:write",                    // two fields
-		"ktms:write:plaintext-token",    // not a hash
-		"ktms:admin:" + hash("x"),       // unknown scope
-		":write:" + hash("x"),           // no name
-		"ktms:write:" + hash("x")[:62],  // short hash
-		"ktms:write:" + hash("x") + ":", // four fields
+		"ktms:write",                                    // two fields
+		"ktms:write:plaintext-token",                    // not a hash
+		"ktms:admin:" + hash("x"),                       // unknown scope
+		":write:" + hash("x"),                           // no name
+		"ktms:write:" + hash("x")[:62],                  // short hash
+		"ktms:write:" + hash("x") + ":",                 // four fields
+		"a:write:" + hash("x") + ",b:read:" + hash("x"), // same token twice
 	} {
 		if _, err := Parse(bad); err == nil {
 			t.Errorf("Parse(%q) accepted a bad entry", bad)
 		}
+	}
+
+	// A comma inside a comment must not start a new entry.
+	v = mustParse(t, "# rotated 2026-10, old one ktms:write:"+hash("old")+"\nnew:write:"+hash("new"))
+	if _, err := v.Check("old", Write); err != ErrUnauthenticated {
+		t.Errorf("token in a comment was accepted: %v", err)
 	}
 
 	if v := mustParse(t, " \n "); v.Enabled() {
@@ -63,9 +70,10 @@ func TestParseErrorHidesToken(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "sk-live-secret") {
 		t.Fatalf("error must reject the entry without echoing it: %v", err)
 	}
-	_, err = Parse("sk-live-secret-without-colons")
-	if err == nil || strings.Contains(err.Error(), "without-colons") {
-		t.Fatalf("error must reject the entry without echoing it: %v", err)
+	for _, bad := range []string{"sk-live-secret-without-colons", "ktms:sk-live-secret:" + hash("x")} {
+		if _, err := Parse(bad); err == nil || strings.Contains(err.Error(), "sk-live-secret") {
+			t.Fatalf("error must reject the entry without echoing it: %v", err)
+		}
 	}
 }
 
@@ -85,6 +93,17 @@ func TestLoadMergesFile(t *testing.T) {
 	}
 	if _, err := Load("", filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Error("missing tokens file was ignored")
+	}
+
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, []byte("# nothing yet\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load("old:write:"+hash("old"), empty); err == nil {
+		t.Error("a tokens file without tokens must fail, not turn auth off")
+	}
+	if _, err := Load("dup:write:"+hash("new"), file); err == nil {
+		t.Error("the same token inline and in the file was accepted")
 	}
 }
 

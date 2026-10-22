@@ -206,7 +206,8 @@ grpcurl -plaintext -d '{"meta_key":"job_id","meta_value":"job-42","group_by_meta
   localhost:9090 usage.v1.UsageService/GetUsageByMeta
 ```
 
-gRPC reflection is on, so `grpcurl` needs no `.proto` files.
+gRPC reflection is on, so `grpcurl` needs no `.proto` files (with auth on, pass a token with
+`-H 'authorization: Bearer …'`).
 
 ## API reference
 
@@ -270,7 +271,8 @@ lists at least one. A token has one or both scopes:
 | `write` | `POST /v1/usage/events`, `POST /v1/usage/events:batch`, `RecordUsageEvent`, `RecordUsageEvents` |
 | `read` | `GET /v1/usage/summary`, `GetUsageSummary`, `GetUsageByMeta` |
 
-`/healthz`, `/readyz`, gRPC health and reflection never need a token.
+`/healthz`, `/readyz` and gRPC health (`grpc.health.v1.Health`, a liveness check) never need a
+token. gRPC reflection accepts any configured token, so `grpcurl` works with `-H` below.
 
 The service stores only SHA-256 hashes. Each entry is `name:scope[+scope]:sha256hex`; entries
 are separated by commas or newlines, and in a file `#` starts a comment:
@@ -295,7 +297,12 @@ grpcurl -plaintext -H "authorization: Bearer $TOKEN" localhost:9090 usage.v1.Usa
 
 **Rotation without downtime**: add the new token's entry next to the old one and restart (or
 roll) the service, switch the clients to the new token, then remove the old entry. Any number of
-entries may be active at once.
+entries may be active at once, each token in one entry only. With `LOG_LEVEL=debug` every
+accepted call logs the token's name, so you can see when the old one stops being used; refused
+calls are logged at `warn`.
+
+A `TOKENMETER_TOKENS_FILE` that is missing, malformed or holds no tokens stops the service at
+startup rather than turning auth off.
 
 With no tokens configured the service logs a warning at startup and lets every call in. Use that
 only on a private network you trust.

@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1"
 	"google.golang.org/grpc/status"
@@ -215,14 +216,21 @@ func TestGRPCServer_Auth(t *testing.T) {
 	_, err = client.GetUsageByMeta(withToken("r-token"), &pb.GetUsageByMetaRequest{})
 	assert.Equal(t, codes.InvalidArgument, code(err))
 
-	refl := grpc_reflection_v1.NewServerReflectionClient(conn)
-	stream, err := refl.ServerReflectionInfo(context.Background())
-	require.NoError(t, err)
-	require.NoError(t, stream.Send(&grpc_reflection_v1.ServerReflectionRequest{
-		MessageRequest: &grpc_reflection_v1.ServerReflectionRequest_ListServices{},
-	}))
-	_, err = stream.Recv()
-	assert.NoError(t, err, "reflection must stay open")
+	hc, err := healthpb.NewHealthClient(conn).Check(context.Background(), &healthpb.HealthCheckRequest{})
+	require.NoError(t, err, "health must not need a token")
+	assert.Equal(t, healthpb.HealthCheckResponse_SERVING, hc.Status)
+
+	listServices := func(ctx context.Context) error {
+		stream, err := grpc_reflection_v1.NewServerReflectionClient(conn).ServerReflectionInfo(ctx)
+		require.NoError(t, err)
+		require.NoError(t, stream.Send(&grpc_reflection_v1.ServerReflectionRequest{
+			MessageRequest: &grpc_reflection_v1.ServerReflectionRequest_ListServices{},
+		}))
+		_, err = stream.Recv()
+		return err
+	}
+	assert.Equal(t, codes.Unauthenticated, code(listServices(context.Background())), "reflection without a token")
+	assert.NoError(t, listServices(withToken("r-token")), "reflection with any token")
 }
 
 func TestGRPCScopesCoverEveryRPC(t *testing.T) {
