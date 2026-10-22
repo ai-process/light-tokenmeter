@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -193,8 +194,7 @@ type errorResponse struct {
 
 func (s *HTTPServer) handleRecordEvent(w http.ResponseWriter, r *http.Request) {
 	var req recordEventRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "Failed to parse request body", err.Error())
+	if !decodeBody(w, r, &req) {
 		return
 	}
 
@@ -216,8 +216,7 @@ func (s *HTTPServer) handleRecordEvent(w http.ResponseWriter, r *http.Request) {
 
 func (s *HTTPServer) handleRecordEvents(w http.ResponseWriter, r *http.Request) {
 	var req recordEventsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "Failed to parse request body", err.Error())
+	if !decodeBody(w, r, &req) {
 		return
 	}
 
@@ -235,7 +234,7 @@ func (s *HTTPServer) handleRecordEvents(w http.ResponseWriter, r *http.Request) 
 	for i, eventReq := range req.Events {
 		event, err := httpRequestToEvent(&eventReq)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "validation_error", fmt.Sprintf("Invalid event at index %d: %s", i, err.Error()), "")
+			writeError(w, http.StatusBadRequest, "validation_error", fmt.Sprintf("invalid event at index %d: %s", i, err.Error()), "")
 			return
 		}
 		events = append(events, event)
@@ -369,6 +368,23 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+// decodeBody reads a JSON body of at most domain.MaxRequestBytes, answering
+// the client itself when it cannot.
+func decodeBody(w http.ResponseWriter, r *http.Request, into any) bool {
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, domain.MaxRequestBytes)).Decode(into)
+	var tooLarge *http.MaxBytesError
+	switch {
+	case err == nil:
+		return true
+	case errors.As(err, &tooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+			fmt.Sprintf("request body exceeds %d bytes", domain.MaxRequestBytes), "")
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_json", "Failed to parse request body", err.Error())
+	}
+	return false
 }
 
 func writeError(w http.ResponseWriter, status int, code, message, details string) {

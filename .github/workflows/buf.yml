@@ -20,6 +20,7 @@ jobs:
       - uses: bufbuild/buf-action@v1
         with:
           setup_only: true
+          version: 1.69.0
 
       - name: Lint
         run: buf lint
@@ -33,4 +34,7 @@ jobs:
       - name: Generated code matches proto/
         run: |
           buf generate
-          git diff --exit-code -- gen/ || { echo "gen/ is stale: run make proto and commit"; exit 1; }
+          if [ -n "$(git status --porcelain -- gen/)" ]; then
+            git status --short -- gen/
+            echo "gen/ is stale: run make proto and commit"; exit 1
+          fi

@@ -136,9 +136,9 @@ An event describes one model call:
 | `duration_ms` | int | no | Call latency. |
 | `tokens_input`, `tokens_output` | int | no | Token counts. |
 | `tokens_total` | int | no | Defaults to input + output; if given it must equal that sum. |
-| `error_class` | string | no | Normalised error class. |
+| `error_class` | string ≤256 | no | Normalised error class. |
 | `vendor_http_status` | int | no | HTTP status returned by the vendor. |
-| `meta` | map of string | no | Your own tags (keep it small), e.g. `{"job_id": "…"}`. |
+| `meta` | map of string | no | Your own tags, e.g. `{"job_id": "…"}`: non-empty keys, at most 16 KiB of keys and values per event. |
 | `cost_nanousd` | int ≥0 | no | Call cost in nano-USD (1e-9 USD), priced by the caller; stored as-is and never recomputed. |
 
 Batches (`POST /v1/usage/events:batch`, or `RecordUsageEvents` over gRPC) take up to 500
@@ -222,9 +222,12 @@ gRPC reflection is on, so `grpcurl` needs no `.proto` files (with auth on, pass 
 | `GET` | `/healthz` | Liveness. |
 | `GET` | `/readyz` | Readiness (database ping). |
 
-Errors are JSON `{"error": "<message>", "code": "<code>", "details": "<optional>"}`, with code
-`invalid_json` or `validation_error` (400), `unauthenticated` (401), `forbidden` (403) or
-`internal_error` (500). Usage routes need a bearer token when auth is on, see
+Errors from `/v1/usage/*` are JSON `{"error": "<message>", "code": "<code>", "details": "<optional>"}`,
+with code `invalid_json` or `validation_error` (400), `unauthenticated` (401), `forbidden` (403),
+`request_too_large` (413, over 16 MiB) or `internal_error` (500). A refused batch names the first
+bad event as `invalid event at index N: …`. `/readyz` answers 503 with
+`{"status":"not ready","error":"database unavailable"}`; unknown paths and methods get a plain
+404 or 405. Usage routes need a bearer token when auth is on, see
 [Authentication](#authentication).
 
 ### gRPC (`:9090`)
@@ -233,7 +236,8 @@ Errors are JSON `{"error": "<message>", "code": "<code>", "details": "<optional>
 `RecordUsageEvent`, `RecordUsageEvents`, `GetUsageSummary`, `GetUsageByMeta`. Go stubs live in
 [`gen/usage/v1`](gen/usage/v1) (`github.com/ai-process/light-tokenmeter/gen/usage/v1`).
 Invalid input is `INVALID_ARGUMENT`; a refused batch names the first bad event as
-`invalid event at index N: …`, so a client can drop that event and resend the rest.
+`invalid event at index N: …`, so a client can drop that event and resend the rest. Messages may
+be up to 16 MiB.
 
 ## API stability
 
@@ -247,15 +251,15 @@ releases fix bugs.
 | --- | --- |
 | gRPC `usage.v1` (`UsageService`) | No RPC, field, enum value or message is removed or renamed, and no field number or type changes. New RPCs and fields may appear. `buf breaking` checks every pull request. |
 | HTTP `/v1/usage/*` | Paths, query parameters, request and response fields of the [events](#sending-events) and [summary](#finding-the-greedy-and-the-worthy) endpoints. New fields and parameters may appear, so ignore unknown fields. |
-| Errors | HTTP status codes and `code` values above; gRPC status codes and the `invalid event at index N` message prefix. New codes may appear, so treat an unknown one like its status. |
+| Errors | HTTP status codes and `code` values above; gRPC status codes; the `invalid event at index N` message prefix on both. New codes may appear, so treat an unknown one like its status. |
 | Authentication | `Authorization: Bearer`, the `write` and `read` scopes and the `TOKENMETER_TOKENS` entry format, see [Authentication](#authentication). |
 | Probes | `/healthz` and `/readyz`, their status codes and the `status` and `clickhouse` fields. |
-| Environment variables | Names, defaults and meaning of every variable in [Configuration](#configuration). |
+| Environment variables | Names and meaning of every variable in [Configuration](#configuration), and their defaults, except tuning knobs (`CLICKHOUSE_BATCH_SIZE`, `CLICKHOUSE_FLUSH_INTERVAL`, `DB_MAX_CONNS`, `DB_MIN_CONNS`), whose defaults may change in a minor release with a changelog note. |
 | Storage | Any 1.x release upgrades the Postgres and ClickHouse schemas of an earlier one by itself at startup, with no manual steps. The tables are not an API, except as the recipes in this README use them. |
-| Limits | Up to 500 events per batch; field lengths in [Sending events](#sending-events) never shrink. |
+| Limits | 500 events per batch, 16 MiB per request, and the field and `meta` limits in [Sending events](#sending-events) never shrink. |
 
-Not public, and free to change in any release: log message text, the `internal/` Go packages,
-the outbox's batch sizes and retry timings, and resource numbers.
+Not public, and free to change in any release: log message text (other than the prefix above),
+the `internal/` Go packages, the outbox's lease and retry timings, and resource numbers.
 
 Nothing is experimental in 1.0. KTMS keeps a copy of `usage.proto` for its usage reports; its CI
 fails when the copy differs from this repository's.

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -29,5 +30,31 @@ func TestZeroOccurredAtMeansUnset(t *testing.T) {
 		Status: StatusSuccess, OccurredAt: &zero}
 	if err := e.Validate(); err != nil || e.OccurredAt != nil {
 		t.Fatalf("zero occurred_at: %v, %v; want it treated as unset", err, e.OccurredAt)
+	}
+}
+
+func TestLimitsOnErrorClassAndMeta(t *testing.T) {
+	base := func() UsageEvent {
+		return UsageEvent{EventID: uuid.New(), UserID: "u", ProjectID: "p", ActionID: "a", Vendor: "v", Model: "m", Status: StatusSuccess}
+	}
+	e := base()
+	e.ErrorClass = strings.Repeat("x", MaxStringLength+1)
+	if err := e.Validate(); err != ErrErrorClassTooLong {
+		t.Errorf("long error_class: %v", err)
+	}
+	e = base()
+	e.Meta = map[string]string{"k": strings.Repeat("v", MaxMetaBytes)}
+	if err := e.Validate(); err != ErrMetaTooLarge {
+		t.Errorf("large meta: %v", err)
+	}
+	e = base()
+	e.Meta = map[string]string{"": "v"}
+	if err := e.Validate(); err != ErrMetaEmptyKey {
+		t.Errorf("empty meta key: %v", err)
+	}
+	e = base()
+	e.Meta = map[string]string{"k": strings.Repeat("v", MaxMetaBytes-1)}
+	if err := e.Validate(); err != nil {
+		t.Errorf("meta at the limit: %v", err)
 	}
 }
