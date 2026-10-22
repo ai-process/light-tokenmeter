@@ -3,7 +3,6 @@ package repository
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -13,80 +12,123 @@ import (
 	"github.com/ai-process/light-tokenmeter/internal/domain"
 )
 
-// ClaimOutbox hands out the next batch for ClickHouse. A batch claimed more
-// than staleAfter ago and never acknowledged (its replica died or gave up)
-// comes first and keeps its ID, so ClickHouse drops a repeat.
-func (r *Repository) ClaimOutbox(ctx context.Context, limit int, staleAfter time.Duration) (uuid.UUID, []*domain.UsageEvent, error) {
-	batch, ids, err := r.claimStale(ctx, staleAfter)
+// OutboxBatch is a claimed batch: its ID is ClickHouse's deduplication token,
+// Attempts counts ClickHouse's refusals of it so far.
+type OutboxBatch struct {
+	ID       uuid.UUID
+	Attempts int
+}
+
+// ClaimOutbox leases the next batch for ClickHouse. A batch whose lease ended
+// (its replica died, or a refusal set it aside for later) comes first and
+// keeps its ID, so ClickHouse drops a repeat of an insert it already stored.
+func (r *Repository) ClaimOutbox(ctx context.Context, limit int, lease time.Duration) (OutboxBatch, []*domain.UsageEvent, error) {
+	batch, ids, err := r.claimExpired(ctx, lease)
 	if err != nil {
-		return uuid.Nil, nil, err
+		return OutboxBatch{}, nil, err
 	}
-	if batch != uuid.Nil {
+	if batch.ID != uuid.Nil {
 		events, err := r.eventsByID(ctx, ids)
 		return batch, events, err
 	}
-	batch = uuid.New()
+	batch = OutboxBatch{ID: uuid.New()}
 	// SKIP LOCKED lets replicas claim side by side; a row another claim just
 	// took fails the batch_id IS NULL recheck and is skipped.
 	rows, err := r.pool.Query(ctx, `
 		WITH claimed AS (
-			UPDATE clickhouse_outbox SET batch_id = $1, claimed_at = now()
+			UPDATE clickhouse_outbox SET batch_id = $1, lease_until = now() + make_interval(secs => $3)
 			WHERE event_id IN (
-				SELECT event_id FROM clickhouse_outbox WHERE batch_id IS NULL
+				SELECT event_id FROM clickhouse_outbox WHERE batch_id IS NULL AND failed_at IS NULL
 				ORDER BY enqueued_at LIMIT $2 FOR UPDATE SKIP LOCKED)
 			RETURNING event_id)
-		SELECT `+eventColumns+` FROM usage_events JOIN claimed USING (event_id)`, batch, limit)
+		SELECT `+eventColumns+` FROM usage_events JOIN claimed USING (event_id)`, batch.ID, limit, lease.Seconds())
 	if err != nil {
-		return uuid.Nil, nil, fmt.Errorf("claim outbox batch: %w", err)
+		return OutboxBatch{}, nil, fmt.Errorf("claim outbox batch: %w", err)
 	}
-	events, err := scanEvents(rows, limit)
+	events, err := scanEvents(rows)
 	if err != nil || len(events) == 0 {
-		return uuid.Nil, nil, err
+		return OutboxBatch{}, nil, err
 	}
 	return batch, events, nil
 }
 
-// claimStale takes over one stale batch. The advisory lock makes a second
-// replica wait and then find the batch fresh, instead of copying it too.
-func (r *Repository) claimStale(ctx context.Context, staleAfter time.Duration) (uuid.UUID, []uuid.UUID, error) {
-	var batch uuid.UUID
-	err := r.pool.QueryRow(ctx, `
+// claimExpired takes over the batch whose lease ended longest ago. Replicas
+// contending for one batch skip it via the advisory lock, and the lease
+// recheck stops a replica that waited from taking a batch just renewed.
+func (r *Repository) claimExpired(ctx context.Context, lease time.Duration) (OutboxBatch, []uuid.UUID, error) {
+	rows, err := r.pool.Query(ctx, `
 		SELECT batch_id FROM clickhouse_outbox
-		WHERE batch_id IS NOT NULL AND claimed_at < now() - make_interval(secs => $1)
-		LIMIT 1`, staleAfter.Seconds()).Scan(&batch)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, nil, nil
-	}
+		WHERE batch_id IS NOT NULL AND lease_until < now()
+		GROUP BY batch_id ORDER BY min(lease_until) LIMIT 8`)
 	if err != nil {
-		return uuid.Nil, nil, fmt.Errorf("find stale outbox batch: %w", err)
+		return OutboxBatch{}, nil, fmt.Errorf("find expired outbox batches: %w", err)
 	}
+	candidates, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return OutboxBatch{}, nil, fmt.Errorf("find expired outbox batches: %w", err)
+	}
+	for _, id := range candidates {
+		ids, attempts, err := r.renewIfExpired(ctx, id, lease)
+		if err != nil {
+			return OutboxBatch{}, nil, err
+		}
+		if len(ids) > 0 {
+			return OutboxBatch{ID: id, Attempts: attempts}, ids, nil
+		}
+	}
+	return OutboxBatch{}, nil, nil
+}
 
+func (r *Repository) renewIfExpired(ctx context.Context, batch uuid.UUID, lease time.Duration) ([]uuid.UUID, int, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return uuid.Nil, nil, fmt.Errorf("reclaim stale outbox batch: %w", err)
+		return nil, 0, fmt.Errorf("take over outbox batch: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, batch); err != nil {
-		return uuid.Nil, nil, fmt.Errorf("reclaim stale outbox batch: %w", err)
+	var locked bool
+	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0))`, batch).Scan(&locked); err != nil {
+		return nil, 0, fmt.Errorf("take over outbox batch: %w", err)
+	}
+	if !locked {
+		return nil, 0, nil
 	}
 	rows, err := tx.Query(ctx, `
-		UPDATE clickhouse_outbox SET claimed_at = now()
-		WHERE batch_id = $1 AND claimed_at < now() - make_interval(secs => $2)
-		RETURNING event_id`, batch, staleAfter.Seconds())
+		UPDATE clickhouse_outbox SET lease_until = now() + make_interval(secs => $2)
+		WHERE batch_id = $1 AND lease_until < now()
+		RETURNING event_id, attempts`, batch, lease.Seconds())
 	if err != nil {
-		return uuid.Nil, nil, fmt.Errorf("reclaim stale outbox batch: %w", err)
+		return nil, 0, fmt.Errorf("take over outbox batch: %w", err)
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
-	if err != nil {
-		return uuid.Nil, nil, fmt.Errorf("reclaim stale outbox batch: %w", err)
+	var (
+		ids      []uuid.UUID
+		attempts int
+	)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id, &attempts); err != nil {
+			rows.Close()
+			return nil, 0, fmt.Errorf("take over outbox batch: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("take over outbox batch: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return uuid.Nil, nil, fmt.Errorf("reclaim stale outbox batch: %w", err)
+		return nil, 0, fmt.Errorf("take over outbox batch: %w", err)
 	}
-	if len(ids) == 0 {
-		return uuid.Nil, nil, nil // another replica took it first
+	return ids, attempts, nil
+}
+
+// RenewOutbox extends a lease while ClickHouse is retried, so nobody takes a
+// batch over from a live replica. False: the batch is no longer there.
+func (r *Repository) RenewOutbox(ctx context.Context, batch uuid.UUID, lease time.Duration) (bool, error) {
+	tag, err := r.pool.Exec(ctx, `UPDATE clickhouse_outbox SET lease_until = now() + make_interval(secs => $2) WHERE batch_id = $1`,
+		batch, lease.Seconds())
+	if err != nil {
+		return false, fmt.Errorf("renew outbox batch %s: %w", batch, err)
 	}
-	return batch, ids, nil
+	return tag.RowsAffected() > 0, nil
 }
 
 func (r *Repository) AckOutbox(ctx context.Context, batch uuid.UUID) error {
@@ -96,22 +138,63 @@ func (r *Repository) AckOutbox(ctx context.Context, batch uuid.UUID) error {
 	return nil
 }
 
-// OutboxBacklog reports how many events wait for ClickHouse and the age of
-// the oldest, zero when none wait.
-func (r *Repository) OutboxBacklog(ctx context.Context) (int64, time.Duration, error) {
-	var (
-		n      int64
-		oldest *time.Time
-		now    time.Time
-	)
-	err := r.pool.QueryRow(ctx, `SELECT count(*), min(enqueued_at), now() FROM clickhouse_outbox`).Scan(&n, &oldest, &now)
+// RetryOutboxLater counts a refusal and makes the batch claimable again after
+// delay, so a refused batch waits while the events behind it flow.
+func (r *Repository) RetryOutboxLater(ctx context.Context, batch uuid.UUID, delay time.Duration) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE clickhouse_outbox SET attempts = attempts + 1, lease_until = now() + make_interval(secs => $2)
+		WHERE batch_id = $1`, batch, delay.Seconds())
 	if err != nil {
-		return 0, 0, fmt.Errorf("outbox backlog: %w", err)
+		return fmt.Errorf("postpone outbox batch %s: %w", batch, err)
 	}
-	if oldest == nil {
-		return 0, 0, nil
+	return nil
+}
+
+// SplitOutbox halves a batch ClickHouse keeps refusing, to corner the event at
+// fault. Fresh IDs are safe: ClickHouse stored nothing under a refused token.
+func (r *Repository) SplitOutbox(ctx context.Context, batch uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `
+		WITH ranked AS (
+			SELECT event_id, row_number() OVER (ORDER BY event_id) <= count(*) OVER () / 2 AS first_half
+			FROM clickhouse_outbox WHERE batch_id = $1)
+		UPDATE clickhouse_outbox o
+		SET batch_id = CASE WHEN ranked.first_half THEN $2::uuid ELSE $3::uuid END,
+			attempts = 0, lease_until = now()
+		FROM ranked WHERE o.event_id = ranked.event_id`, batch, uuid.New(), uuid.New())
+	if err != nil {
+		return fmt.Errorf("split outbox batch %s: %w", batch, err)
 	}
-	return n, now.Sub(*oldest), nil
+	return nil
+}
+
+// SetAsideOutbox stops copying an event ClickHouse refuses on its own. It
+// stays in the outbox, and in Postgres reports, until someone retries it.
+func (r *Repository) SetAsideOutbox(ctx context.Context, event uuid.UUID, reason string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE clickhouse_outbox SET batch_id = NULL, lease_until = NULL, failed_at = now(), failure = $2
+		WHERE event_id = $1`, event, reason)
+	if err != nil {
+		return fmt.Errorf("set aside outbox event %s: %w", event, err)
+	}
+	return nil
+}
+
+// OutboxBacklog reports the events waiting for ClickHouse, the age of the
+// oldest of them, and the events set aside.
+func (r *Repository) OutboxBacklog(ctx context.Context) (waiting int64, oldest time.Duration, setAside int64, err error) {
+	var since *time.Time
+	var now time.Time
+	err = r.pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE failed_at IS NULL), min(enqueued_at) FILTER (WHERE failed_at IS NULL),
+			count(*) FILTER (WHERE failed_at IS NOT NULL), now()
+		FROM clickhouse_outbox`).Scan(&waiting, &since, &setAside, &now)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("outbox backlog: %w", err)
+	}
+	if since != nil {
+		oldest = now.Sub(*since)
+	}
+	return waiting, oldest, setAside, nil
 }
 
 const eventColumns = `event_id, created_at, occurred_at, user_id, project_id, action_id,
@@ -123,12 +206,12 @@ func (r *Repository) eventsByID(ctx context.Context, ids []uuid.UUID) ([]*domain
 	if err != nil {
 		return nil, fmt.Errorf("load outbox events: %w", err)
 	}
-	return scanEvents(rows, len(ids))
+	return scanEvents(rows)
 }
 
-func scanEvents(rows pgx.Rows, capacity int) ([]*domain.UsageEvent, error) {
+func scanEvents(rows pgx.Rows) ([]*domain.UsageEvent, error) {
 	defer rows.Close()
-	events := make([]*domain.UsageEvent, 0, capacity)
+	var events []*domain.UsageEvent
 	for rows.Next() {
 		var (
 			e      domain.UsageEvent

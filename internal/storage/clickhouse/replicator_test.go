@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -16,17 +17,14 @@ import (
 	"github.com/ai-process/light-tokenmeter/internal/testdb"
 )
 
-// flakyConn fails the first fails inserts, like ClickHouse during an outage.
+// flakyConn stands in for a troubled ClickHouse: it can be unreachable for
+// the next fails inserts, and refuse rows of model "poison" the way the
+// client (on Append) or the server (on Send) would.
 type flakyConn struct {
 	driver.Conn
-	mu    sync.Mutex
-	fails int
-}
-
-func (c *flakyConn) setFails(n int) {
-	c.mu.Lock()
-	c.fails = n
-	c.mu.Unlock()
+	mu           sync.Mutex
+	fails        int
+	poisonServer bool // refuse on Send with a data error, not on Append
 }
 
 func (c *flakyConn) PrepareBatch(ctx context.Context, query string, opts ...driver.PrepareBatchOption) (driver.Batch, error) {
@@ -39,7 +37,35 @@ func (c *flakyConn) PrepareBatch(ctx context.Context, query string, opts ...driv
 	if down {
 		return nil, errors.New("connection refused")
 	}
-	return c.Conn.PrepareBatch(ctx, query, opts...)
+	b, err := c.Conn.PrepareBatch(ctx, query, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &poisonBatch{Batch: b, server: c.poisonServer}, nil
+}
+
+type poisonBatch struct {
+	driver.Batch
+	server   bool
+	poisoned bool
+}
+
+func (b *poisonBatch) Append(v ...any) error {
+	if v[8] == "poison" { // model
+		if !b.server {
+			return errors.New("cannot convert value")
+		}
+		b.poisoned = true
+	}
+	return b.Batch.Append(v...)
+}
+
+func (b *poisonBatch) Send() error {
+	if b.poisoned {
+		_ = b.Batch.Abort()
+		return &clickhouse.Exception{Code: 53, Message: "Type mismatch"}
+	}
+	return b.Batch.Send()
 }
 
 type totals struct{ requests, tokens, cost int64 }
@@ -68,130 +94,123 @@ func chTotals(t *testing.T, c *Client, from, to time.Time) totals {
 	return out
 }
 
+type stack struct {
+	ch   *Client
+	repo *repository.Repository
+	from time.Time
+}
+
+func newStack(t *testing.T) *stack {
+	ch := getTestClient(t)
+	pool := testdb.Postgres(t)
+	if ch == nil || pool == nil {
+		t.SkipNow()
+	}
+	return &stack{ch: ch, repo: repository.New(pool).WithOutbox(), from: time.Now().Add(-time.Hour)}
+}
+
+func (s *stack) record(t *testing.T, n int, model string) {
+	batch := make([]*domain.UsageEvent, 0, n)
+	for i := 0; i < n; i++ {
+		at := time.Now().UTC()
+		batch = append(batch, &domain.UsageEvent{
+			EventID: uuid.New(), OccurredAt: &at, UserID: "u", ProjectID: "p", ActionID: "a",
+			Vendor: "openai", Model: model, Status: domain.StatusSuccess,
+			TokensInput: int64(i % 7), TokensOutput: 3, TokensTotal: int64(i%7) + 3, CostNanoUSD: int64(i),
+		})
+	}
+	_, err := s.repo.InsertBatch(context.Background(), batch)
+	require.NoError(t, err)
+}
+
+// drain copies until nothing waits, as the loop would over several ticks.
+func (s *stack) drain(t *testing.T, r *Replicator) {
+	for i := 0; i < 1000; i++ {
+		for r.copyBatch() {
+		}
+		waiting, _, _, err := s.repo.OutboxBacklog(context.Background())
+		require.NoError(t, err)
+		if waiting == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the outbox never drained")
+}
+
+func (s *stack) requireInStep(t *testing.T, without totals) {
+	to := time.Now().Add(time.Hour)
+	pg := pgTotals(t, s.repo, s.from, to)
+	pg.requests, pg.tokens, pg.cost = pg.requests-without.requests, pg.tokens-without.tokens, pg.cost-without.cost
+	require.Equal(t, pg, chTotals(t, s.ch, s.from, to), "ClickHouse must hold exactly what Postgres holds")
+}
+
 // Events recorded during a ClickHouse outage, a batch copied but never
 // acknowledged (the process died), and a restart: Postgres and ClickHouse
 // totals still agree, with nothing lost and nothing counted twice.
 func TestReplicatorKeepsClickHouseInStepWithPostgres(t *testing.T) {
-	ch := getTestClient(t)
-	pool := testdb.Postgres(t)
-	if ch == nil || pool == nil {
-		return
-	}
-	repo := repository.New(pool).WithOutbox()
+	s := newStack(t)
 	ctx := context.Background()
-	from := time.Now().Add(-time.Hour)
 
-	record := func(n int) {
-		batch := make([]*domain.UsageEvent, 0, n)
-		for i := 0; i < n; i++ {
-			at := time.Now().UTC()
-			batch = append(batch, &domain.UsageEvent{
-				EventID: uuid.New(), OccurredAt: &at, UserID: "u", ProjectID: "p", ActionID: "a",
-				Vendor: "openai", Model: "m", Status: domain.StatusSuccess,
-				TokensInput: int64(i % 7), TokensOutput: 3, TokensTotal: int64(i%7) + 3, CostNanoUSD: int64(i),
-			})
-		}
-		_, err := repo.InsertBatch(ctx, batch)
-		require.NoError(t, err)
-	}
-
-	// ClickHouse is down for the first three inserts; the replicator retries
-	// the same batch and the outbox keeps everything meanwhile.
-	record(500)
-	down := NewReplicator(repo, &flakyConn{Conn: ch.Conn(), fails: 3}, 200, 5*time.Millisecond)
+	s.record(t, 500, "m")
+	down := NewReplicator(s.repo, &flakyConn{Conn: s.ch.Conn(), fails: 3}, 200, 5*time.Millisecond)
 	require.True(t, down.copyBatch(), "a full batch, once ClickHouse is back")
 
-	// A batch reaches ClickHouse but the process dies before acknowledging it.
-	batch, events, err := repo.ClaimOutbox(ctx, 200, time.Hour)
+	batch, events, err := s.repo.ClaimOutbox(ctx, 200, time.Hour)
 	require.NoError(t, err)
-	require.NoError(t, down.insert(ctx, batch, events))
-	_, err = pool.Exec(ctx, "UPDATE clickhouse_outbox SET claimed_at = now() - interval '1 hour' WHERE batch_id = $1", batch)
-	require.NoError(t, err)
+	require.NoError(t, down.insert(ctx, batch.ID, events))
+	// The process dies here, before AckOutbox; its lease runs out.
+	expireLease(t, s, batch.ID)
 
-	// After the restart more events arrive while the replicator catches up.
-	record(700)
-	restarted := NewReplicator(repo, ch.Conn(), 200, 5*time.Millisecond)
-	for restarted.copyBatch() {
-	}
-	for {
-		n, _, err := repo.OutboxBacklog(ctx)
-		require.NoError(t, err)
-		if n == 0 {
-			break
+	s.record(t, 700, "m")
+	s.drain(t, NewReplicator(s.repo, s.ch.Conn(), 200, 5*time.Millisecond))
+	require.EqualValues(t, 1200, pgTotals(t, s.repo, s.from, time.Now().Add(time.Hour)).requests)
+	s.requireInStep(t, totals{})
+}
+
+func expireLease(t *testing.T, s *stack, batch uuid.UUID) {
+	waiting, _, _, err := s.repo.OutboxBacklog(context.Background())
+	require.NoError(t, err)
+	require.NotZero(t, waiting)
+	require.NoError(t, s.repo.RetryOutboxLater(context.Background(), batch, -time.Second))
+}
+
+// One event ClickHouse cannot take, refused by the client or by the server,
+// is set aside; every other event, in its batch or behind it, gets through.
+func TestPoisonEventIsSetAsideAndTheRestFlows(t *testing.T) {
+	for _, server := range []bool{false, true} {
+		name := "refused on append"
+		if server {
+			name = "refused by the server"
 		}
-		restarted.copyBatch()
-	}
+		t.Run(name, func(t *testing.T) {
+			s := newStack(t)
+			s.record(t, 40, "m")
+			s.record(t, 1, "poison")
+			s.record(t, 40, "m")
 
-	to := time.Now().Add(time.Hour)
-	want := pgTotals(t, repo, from, to)
-	require.EqualValues(t, 1200, want.requests)
-	require.Equal(t, want, chTotals(t, ch, from, to), "ClickHouse totals must match Postgres")
-}
+			r := NewReplicator(s.repo, &flakyConn{Conn: s.ch.Conn(), poisonServer: server}, 32, time.Millisecond)
+			r.retryMax = time.Millisecond // refusal delays become a few milliseconds
+			s.drain(t, r)
 
-// A batch ClickHouse keeps refusing is given up after holdFor: the events
-// behind it still flow, and it is copied once stale and accepted.
-func TestRefusedBatchDoesNotStallReplication(t *testing.T) {
-	ch := getTestClient(t)
-	pool := testdb.Postgres(t)
-	if ch == nil || pool == nil {
-		return
-	}
-	repo := repository.New(pool).WithOutbox()
-	ctx := context.Background()
-	from := time.Now().Add(-time.Hour)
-	add := func() {
-		at := time.Now().UTC()
-		_, err := repo.InsertOne(ctx, &domain.UsageEvent{
-			EventID: uuid.New(), OccurredAt: &at, UserID: "u", ProjectID: "p", ActionID: "a",
-			Vendor: "openai", Model: "m", Status: domain.StatusSuccess, TokensTotal: 5, CostNanoUSD: 7,
+			_, _, setAside, err := s.repo.OutboxBacklog(context.Background())
+			require.NoError(t, err)
+			require.EqualValues(t, 1, setAside)
+			to := time.Now().Add(time.Hour)
+			pg := pgTotals(t, s.repo, s.from, to)
+			require.EqualValues(t, 81, pg.requests)
+			// The poison event is the first of its record call: 0 input + 3 output tokens, cost 0.
+			s.requireInStep(t, totals{requests: 1, tokens: 3})
 		})
-		require.NoError(t, err)
 	}
-	for i := 0; i < 3; i++ {
-		add()
-	}
-
-	conn := &flakyConn{Conn: ch.Conn(), fails: 1 << 30}
-	r := NewReplicator(repo, conn, 3, 5*time.Millisecond)
-	r.holdFor, r.stale = 50*time.Millisecond, time.Hour
-	start := time.Now()
-	require.False(t, r.copyBatch(), "the refused batch is given up")
-	require.Less(t, time.Since(start), 5*time.Second)
-
-	conn.setFails(0)
-	for i := 0; i < 2; i++ {
-		add()
-	}
-	require.False(t, r.copyBatch(), "newer events are copied past the refused batch")
-	n, _, err := repo.OutboxBacklog(ctx)
-	require.NoError(t, err)
-	require.EqualValues(t, 3, n, "only the refused batch waits")
-
-	r.stale = 0
-	r.copyBatch()
-	n, _, err = repo.OutboxBacklog(ctx)
-	require.NoError(t, err)
-	require.Zero(t, n)
-	to := time.Now().Add(time.Hour)
-	require.Equal(t, pgTotals(t, repo, from, to), chTotals(t, ch, from, to))
 }
 
-// Close cuts a retry loop short and leaves the batch claimed for the next start.
+// Close cuts a retry loop short and leaves the batch leased for the next start.
 func TestReplicatorCloseDuringOutage(t *testing.T) {
-	ch := getTestClient(t)
-	pool := testdb.Postgres(t)
-	if ch == nil || pool == nil {
-		return
-	}
-	repo := repository.New(pool).WithOutbox()
-	at := time.Now().UTC()
-	_, err := repo.InsertOne(context.Background(), &domain.UsageEvent{
-		EventID: uuid.New(), OccurredAt: &at, UserID: "u", ProjectID: "p", ActionID: "a",
-		Vendor: "openai", Model: "m", Status: domain.StatusSuccess, TokensTotal: 0,
-	})
-	require.NoError(t, err)
+	s := newStack(t)
+	s.record(t, 1, "m")
 
-	r := NewReplicator(repo, &flakyConn{Conn: ch.Conn(), fails: 1 << 30}, 10, 5*time.Millisecond)
+	r := NewReplicator(s.repo, &flakyConn{Conn: s.ch.Conn(), fails: 1 << 30}, 10, 5*time.Millisecond)
 	r.Start()
 	time.Sleep(50 * time.Millisecond)
 	done := make(chan struct{})
@@ -201,7 +220,22 @@ func TestReplicatorCloseDuringOutage(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close did not stop a replicator stuck on a down ClickHouse")
 	}
-	n, _, err := repo.OutboxBacklog(context.Background())
+	waiting, _, setAside, err := s.repo.OutboxBacklog(context.Background())
 	require.NoError(t, err)
-	require.EqualValues(t, 1, n, "the event stays in the outbox")
+	require.EqualValues(t, 1, waiting, "the event stays in the outbox")
+	require.Zero(t, setAside, "an outage never sets events aside")
+}
+
+// An outage is not the events' fault: however long it lasts, nothing is set aside.
+func TestOutageNeverSetsEventsAside(t *testing.T) {
+	s := newStack(t)
+	s.record(t, 5, "m")
+	conn := &flakyConn{Conn: s.ch.Conn(), fails: 20}
+	r := NewReplicator(s.repo, conn, 5, time.Millisecond)
+	r.retryMax = time.Millisecond
+	s.drain(t, r)
+	_, _, setAside, err := s.repo.OutboxBacklog(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, setAside)
+	s.requireInStep(t, totals{})
 }

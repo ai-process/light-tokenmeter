@@ -131,7 +131,7 @@ An event describes one model call:
 | `vendor` | string ≤64 | yes | `openai`, `anthropic`, `google`, … (free-form). |
 | `model` | string ≤128 | yes | Model name. |
 | `status` | string | yes | `success`, `error`, `cancelled` or `timeout`. |
-| `occurred_at` | RFC 3339 | no | When it happened; the server's clock is used otherwise. |
+| `occurred_at` | RFC 3339 | no | When it happened, between 1900 and 2299; the server's clock is used otherwise. |
 | `duration_ms` | int | no | Call latency. |
 | `tokens_input`, `tokens_output` | int | no | Token counts. |
 | `tokens_total` | int | no | Defaults to input + output; if given it must equal that sum. |
@@ -332,14 +332,19 @@ Postgres is always the record. With `CLICKHOUSE_ENABLED=true`:
   take different batches.
 - **Reads**: `/v1/usage/summary`, `GetUsageSummary` and `GetUsageByMeta` are answered from
   ClickHouse, so they trail writes by about one flush interval.
-- **ClickHouse down**: events wait in the outbox and the insert is retried with backoff (up to
-  15 s apart); nothing is dropped and writes keep working. The outbox drains once ClickHouse is back.
-  A batch ClickHouse keeps refusing is set aside after a minute and retried two minutes after it was
-  taken, so it never holds up the events behind it.
+- **ClickHouse unreachable** (or failing for reasons not about the rows): the replica keeps its
+  batch, renews its two-minute lease, and retries with backoff up to 15 s apart. Nothing is
+  dropped or set aside, and writes keep working; the outbox drains once ClickHouse is back.
+- **ClickHouse refusing rows** (a data error such as a type mismatch): the batch is retried 30 s and
+  60 s later while the events behind it flow, then halved, and halved again, until the one event
+  at fault is **set aside**: it stays in `clickhouse_outbox` with `failed_at` and the error in
+  `failure`, and in Postgres reports. To retry set-aside events after fixing the cause:
+  `UPDATE clickhouse_outbox SET failed_at = NULL, failure = NULL WHERE failed_at IS NOT NULL`.
 - **Restart or crash**: waiting events stay in the outbox. A batch inserted but not yet removed
-  is inserted again two minutes later under the same deduplication token, and ClickHouse ignores
-  the repeat: the table remembers the last 100 000 inserts (`non_replicated_deduplication_window`;
-  a `ReplicatedMergeTree` you create yourself needs `replicated_deduplication_window`).
+  is taken over when its lease ends and inserted again under the same deduplication token;
+  ClickHouse ignores the repeat, as it remembers the last 100 000 inserts
+  (`non_replicated_deduplication_window`; a `ReplicatedMergeTree` you create yourself needs
+  `replicated_deduplication_window`).
 
 Set `CLICKHOUSE_ENABLED` the same on every replica: an event written by a replica with it off is
 never queued for ClickHouse.
