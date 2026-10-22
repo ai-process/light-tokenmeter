@@ -28,7 +28,7 @@ jobs:
           CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
         ports: ["9000:9000"]
         options: >-
-          --health-cmd "wget -q --spider http://localhost:8123/ping || exit 1" --health-interval 2s --health-timeout 3s --health-retries 30
+          --health-cmd "wget -q --spider http://127.0.0.1:8123/ping || exit 1" --health-interval 2s --health-timeout 3s --health-retries 30
     steps:
       - uses: actions/checkout@v4
 
