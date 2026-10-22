@@ -2,18 +2,16 @@ package service
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ai-process/light-tokenmeter/internal/database"
 	"github.com/ai-process/light-tokenmeter/internal/domain"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
+	"github.com/ai-process/light-tokenmeter/internal/testdb"
 )
 
 type mockSink struct {
@@ -98,22 +96,9 @@ func TestUsageService_EventSinkConfiguration(t *testing.T) {
 // A batch sent again (the client lost the reply and retried) must not reach
 // the analytics sink twice: ClickHouse would count its tokens and cost twice.
 func TestRecordEventsFeedsSinkOnlyNewEvents(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://tokenmeter:tokenmeter@localhost:5433/tokenmeter?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil || pool.Ping(ctx) != nil {
-		t.Skip("test postgres unavailable")
-	}
-	defer pool.Close()
-	if err := database.RunMigrations(ctx, dbURL); err != nil {
-		t.Fatalf("migrations: %v", err)
-	}
-	_, err = pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
+	pool := testdb.Postgres(t)
 
 	sink := &mockSink{}
 	svc := NewUsageService(repository.New(pool)).WithEventSink(sink)

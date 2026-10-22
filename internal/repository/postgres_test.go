@@ -3,7 +3,6 @@ package repository
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -12,45 +11,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ai-process/light-tokenmeter/internal/database"
 	"github.com/ai-process/light-tokenmeter/internal/domain"
+	"github.com/ai-process/light-tokenmeter/internal/testdb"
 )
 
 func getTestPool(t *testing.T) (*pgxpool.Pool, *Repository) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://tokenmeter:tokenmeter@localhost:5433/tokenmeter?sslmode=disable"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	poolCfg, err := pgxpool.ParseConfig(dbURL)
-	if err != nil {
-		t.Skipf("cannot parse database config: %v", err)
-	}
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
-	if err != nil {
-		t.Skipf("cannot connect to test postgres: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("cannot ping test postgres: %v", err)
-	}
-
-	if err := database.RunMigrations(ctx, dbURL); err != nil {
-		t.Fatalf("failed to run migrations: %v", err)
-	}
-
+	t.Helper()
+	pool := testdb.Postgres(t)
 	return pool, New(pool)
 }
 
 func TestExplainJobIdIndex(t *testing.T) {
 	pool, repo := getTestPool(t)
 	ctx := context.Background()
-
-	// Clear table and insert test data
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
 
 	events := make([]*domain.UsageEvent, 0, 500)
 	for i := 0; i < 500; i++ {
@@ -68,7 +41,7 @@ func TestExplainJobIdIndex(t *testing.T) {
 			Meta:         map[string]string{"job_id": fmt.Sprintf("job-%d", i%10)},
 		})
 	}
-	_, err = repo.InsertBatch(ctx, events)
+	_, err := repo.InsertBatch(ctx, events)
 	require.NoError(t, err)
 
 	_, err = pool.Exec(ctx, "VACUUM ANALYZE usage_events;")
@@ -98,17 +71,14 @@ func TestExplainJobIdIndex(t *testing.T) {
 }
 
 func TestQuerySummary_OccurredAt(t *testing.T) {
-	pool, repo := getTestPool(t)
+	_, repo := getTestPool(t)
 	ctx := context.Background()
-
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
 
 	now := time.Now().UTC()
 	occurred3DaysAgo := now.Add(-72 * time.Hour)
 
 	// Insert event with past occurred_at
-	_, err = repo.InsertOne(ctx, &domain.UsageEvent{
+	_, err := repo.InsertOne(ctx, &domain.UsageEvent{
 		EventID:      uuid.New(),
 		OccurredAt:   &occurred3DaysAgo,
 		UserID:       "backfill-user",
@@ -148,9 +118,6 @@ func TestQuerySummary_TruncatedFlag(t *testing.T) {
 	pool, repo := getTestPool(t)
 	ctx := context.Background()
 
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
-
 	now := time.Now().UTC()
 
 	// Insert 10005 events with different action_ids so grouping produces 10005 rows
@@ -175,7 +142,7 @@ func TestQuerySummary_TruncatedFlag(t *testing.T) {
 			30
 		FROM generate_series(1, 10005) AS s(i);
 	`
-	_, err = pool.Exec(ctx, insertSQL, now)
+	_, err := pool.Exec(ctx, insertSQL, now)
 	require.NoError(t, err)
 
 	rows, truncated, err := repo.QuerySummary(ctx, domain.SummaryParams{
@@ -191,9 +158,6 @@ func TestQuerySummary_TruncatedFlag(t *testing.T) {
 func TestQueryUsageByMeta_TruncatedFlag(t *testing.T) {
 	pool, repo := getTestPool(t)
 	ctx := context.Background()
-
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
 
 	// Insert 10005 events with same job_id but different group_by_meta_key values
 	insertSQL := `
@@ -215,7 +179,7 @@ func TestQueryUsageByMeta_TruncatedFlag(t *testing.T) {
 			jsonb_build_object('job_id', 'job-xyz', 'task_id', 'task-' || i::text)
 		FROM generate_series(1, 10005) AS s(i);
 	`
-	_, err = pool.Exec(ctx, insertSQL)
+	_, err := pool.Exec(ctx, insertSQL)
 	require.NoError(t, err)
 
 	rows, truncated, err := repo.QueryUsageByMeta(ctx, domain.MetaUsageParams{
@@ -229,11 +193,8 @@ func TestQueryUsageByMeta_TruncatedFlag(t *testing.T) {
 }
 
 func TestCostAggregation(t *testing.T) {
-	pool, repo := getTestPool(t)
+	_, repo := getTestPool(t)
 	ctx := context.Background()
-
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
 
 	newEvent := func(model string, cost int64) *domain.UsageEvent {
 		return &domain.UsageEvent{
@@ -252,7 +213,7 @@ func TestCostAggregation(t *testing.T) {
 		}
 	}
 
-	_, err = repo.InsertOne(ctx, newEvent("gpt-4o", 1_000_000))
+	_, err := repo.InsertOne(ctx, newEvent("gpt-4o", 1_000_000))
 	require.NoError(t, err)
 	_, err = repo.InsertBatch(ctx, []*domain.UsageEvent{
 		newEvent("gpt-4o", 2_000_000),
@@ -286,10 +247,8 @@ func TestCostAggregation(t *testing.T) {
 // A retried batch inserts nothing new, and InsertBatch says so by ID, so the
 // caller can keep duplicates out of downstream sinks.
 func TestInsertBatchReturnsOnlyNewIDs(t *testing.T) {
-	pool, repo := getTestPool(t)
+	_, repo := getTestPool(t)
 	ctx := context.Background()
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
 
 	now := time.Now()
 	mk := func() *domain.UsageEvent {

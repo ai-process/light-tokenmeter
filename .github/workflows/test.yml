@@ -9,6 +9,26 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Without the databases the storage tests skip, so CI provides both.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: tokenmeter
+          POSTGRES_PASSWORD: tokenmeter
+          POSTGRES_DB: tokenmeter
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U tokenmeter -d tokenmeter" --health-interval 2s --health-timeout 3s --health-retries 15
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.3-alpine
+        env:
+          CLICKHOUSE_USER: tokenmeter
+          CLICKHOUSE_PASSWORD: tokenmeter
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports: ["9000:9000"]
+        options: >-
+          --health-cmd "wget -q --spider http://127.0.0.1:8123/ping || exit 1" --health-interval 2s --health-timeout 3s --health-retries 30
     steps:
       - uses: actions/checkout@v4
 
@@ -21,6 +41,8 @@ jobs:
         run: go vet ./...
 
       - name: Run tests
+        env:
+          REQUIRE_DB: "1" # the Postgres and ClickHouse tests fail rather than skip
         run: go test -race ./...
 
   docker:
