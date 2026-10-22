@@ -140,7 +140,7 @@ func (s *stack) drain(t *testing.T, r *Replicator) {
 	for i := 0; i < 1000; i++ {
 		for r.copyBatch() {
 		}
-		waiting, _, _, err := s.repo.OutboxBacklog(context.Background())
+		waiting, _, err := s.repo.OutboxBacklog(context.Background())
 		require.NoError(t, err)
 		if waiting == 0 {
 			return
@@ -168,11 +168,12 @@ func TestReplicatorKeepsClickHouseInStepWithPostgres(t *testing.T) {
 	down := NewReplicator(s.repo, &flakyConn{Conn: s.ch.Conn(), fails: 3}, 200, 5*time.Millisecond)
 	require.True(t, down.copyBatch(), "a full batch, once ClickHouse is back")
 
-	batch, events, err := s.repo.ClaimOutbox(ctx, uuid.New(), 200, time.Hour)
+	crashed := uuid.New()
+	batch, events, err := s.repo.ClaimOutbox(ctx, crashed, 200, time.Hour)
 	require.NoError(t, err)
 	require.NoError(t, down.insert(ctx, batch.ID, events))
 	// The process dies here, before AckOutbox; its lease runs out.
-	expireLease(t, s, batch.ID)
+	expireLease(t, s, crashed, batch.ID)
 
 	s.record(t, 700, "m")
 	s.drain(t, NewReplicator(s.repo, s.ch.Conn(), 200, 5*time.Millisecond))
@@ -180,16 +181,16 @@ func TestReplicatorKeepsClickHouseInStepWithPostgres(t *testing.T) {
 	s.requireInStep(t, totals{})
 }
 
-func expireLease(t *testing.T, s *stack, batch uuid.UUID) {
-	waiting, _, _, err := s.repo.OutboxBacklog(context.Background())
+func expireLease(t *testing.T, s *stack, owner, batch uuid.UUID) {
+	ok, err := s.repo.RetryOutboxLater(context.Background(), owner, batch, -time.Second)
 	require.NoError(t, err)
-	require.NotZero(t, waiting)
-	require.NoError(t, s.repo.RetryOutboxLater(context.Background(), batch, -time.Second))
+	require.True(t, ok)
 }
 
-// One event ClickHouse cannot take, refused by the client or by the server,
-// is set aside; every other event, in its batch or behind it, gets through.
-func TestPoisonEventIsSetAsideAndTheRestFlows(t *testing.T) {
+// A batch ClickHouse refuses, on the client or on the server, waits under
+// its token while the events behind it flow; once ClickHouse takes it, the
+// totals agree with nothing counted twice.
+func TestRefusedBatchWaitsAndTheRestFlows(t *testing.T) {
 	for _, server := range []bool{false, true} {
 		name := "refused on append"
 		if server {
@@ -197,22 +198,24 @@ func TestPoisonEventIsSetAsideAndTheRestFlows(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			s := newStack(t)
-			s.record(t, 40, "m")
 			s.record(t, 1, "poison")
 			s.record(t, 40, "m")
-
-			r := NewReplicator(s.repo, &flakyConn{Conn: s.ch.Conn(), poisonServer: server}, 32, time.Millisecond)
-			r.retryMax = time.Millisecond // refusal delays become a few milliseconds
-			s.drain(t, r)
-
-			_, _, setAside, err := s.repo.OutboxBacklog(context.Background())
+			conn := &flakyConn{Conn: s.ch.Conn(), poisonServer: server}
+			r := NewReplicator(s.repo, conn, 32, time.Millisecond)
+			r.retryMax = time.Millisecond // postponements become a few milliseconds
+			for i := 0; i < 30; i++ {
+				for r.copyBatch() {
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+			waiting, _, err := s.repo.OutboxBacklog(context.Background())
 			require.NoError(t, err)
-			require.EqualValues(t, 1, setAside)
-			to := time.Now().Add(time.Hour)
-			pg := pgTotals(t, s.repo, s.from, to)
-			require.EqualValues(t, 81, pg.requests)
-			// The poison event is the first of its record call: 0 input + 3 output tokens, cost 0.
-			s.requireInStep(t, totals{requests: 1, tokens: 3})
+			require.NotZero(t, waiting, "the refused batch waits")
+			require.Less(t, waiting, int64(41), "events behind it got through")
+
+			conn.heal()
+			s.drain(t, r)
+			s.requireInStep(t, totals{})
 		})
 	}
 }
@@ -232,59 +235,17 @@ func TestReplicatorCloseDuringOutage(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close did not stop a replicator stuck on a down ClickHouse")
 	}
-	waiting, _, setAside, err := s.repo.OutboxBacklog(context.Background())
+	waiting, _, err := s.repo.OutboxBacklog(context.Background())
 	require.NoError(t, err)
 	require.EqualValues(t, 1, waiting, "the event stays in the outbox")
-	require.Zero(t, setAside, "an outage never sets events aside")
 }
 
-// An outage is not the events' fault: however long it lasts, nothing is set aside.
-func TestOutageNeverSetsEventsAside(t *testing.T) {
+// A long outage only delays: the batch is held, then copied once.
+func TestLongOutageOnlyDelays(t *testing.T) {
 	s := newStack(t)
 	s.record(t, 5, "m")
-	conn := &flakyConn{Conn: s.ch.Conn(), fails: 20}
-	r := NewReplicator(s.repo, conn, 5, time.Millisecond)
+	r := NewReplicator(s.repo, &flakyConn{Conn: s.ch.Conn(), fails: 20}, 5, time.Millisecond)
 	r.retryMax = time.Millisecond
-	s.drain(t, r)
-	_, _, setAside, err := s.repo.OutboxBacklog(context.Background())
-	require.NoError(t, err)
-	require.Zero(t, setAside)
-	s.requireInStep(t, totals{})
-}
-
-// The schema insert expects must be what EnsureSchema builds, or every
-// refusal would be blamed on the schema and nothing ever set aside.
-func TestInsertedColumnsMatchSchema(t *testing.T) {
-	s := newStack(t)
-	r := NewReplicator(s.repo, s.ch.Conn(), 10, time.Millisecond)
-	mismatch, err := r.schemaMismatch()
-	require.NoError(t, err)
-	require.Empty(t, mismatch)
-}
-
-// With the schema changed under it, a ClickHouse refusing every row is not
-// the rows' fault: they wait, none is set aside, and all flow once it is fixed.
-func TestChangedSchemaNeverSetsEventsAside(t *testing.T) {
-	s := newStack(t)
-	ctx := context.Background()
-	require.NoError(t, s.ch.Conn().Exec(ctx, "ALTER TABLE usage_events MODIFY COLUMN error_class String"))
-	s.record(t, 6, "poison") // refused by the server, as a broken schema would
-
-	conn := &flakyConn{Conn: s.ch.Conn(), poisonServer: true}
-	r := NewReplicator(s.repo, conn, 2, time.Millisecond)
-	r.retryMax = time.Millisecond
-	for i := 0; i < 50; i++ {
-		for r.copyBatch() {
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	waiting, _, setAside, err := s.repo.OutboxBacklog(ctx)
-	require.NoError(t, err)
-	require.Zero(t, setAside, "a schema problem must not set events aside")
-	require.EqualValues(t, 6, waiting)
-
-	require.NoError(t, s.ch.Conn().Exec(ctx, "ALTER TABLE usage_events MODIFY COLUMN error_class LowCardinality(String)"))
-	conn.heal()
 	s.drain(t, r)
 	s.requireInStep(t, totals{})
 }

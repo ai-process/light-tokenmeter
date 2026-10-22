@@ -20,8 +20,8 @@ type OutboxBatch struct {
 }
 
 // ClaimOutbox leases the next batch for ClickHouse. A batch whose lease ended
-// (its replica died, or a refusal set it aside for later) comes first and
-// keeps its ID, so ClickHouse drops a repeat of an insert it already stored.
+// (its replica died, or a refusal postponed it) comes first and keeps its ID
+// for good, so ClickHouse drops a repeat of an insert it already stored.
 func (r *Repository) ClaimOutbox(ctx context.Context, owner uuid.UUID, limit int, lease time.Duration) (OutboxBatch, []*domain.UsageEvent, error) {
 	batch, ids, err := r.claimExpired(ctx, owner, lease)
 	if err != nil {
@@ -38,7 +38,7 @@ func (r *Repository) ClaimOutbox(ctx context.Context, owner uuid.UUID, limit int
 		WITH claimed AS (
 			UPDATE clickhouse_outbox SET batch_id = $1, lease_until = now() + make_interval(secs => $3), lease_owner = $4
 			WHERE event_id IN (
-				SELECT event_id FROM clickhouse_outbox WHERE batch_id IS NULL AND failed_at IS NULL
+				SELECT event_id FROM clickhouse_outbox WHERE batch_id IS NULL
 				ORDER BY enqueued_at LIMIT $2 FOR UPDATE SKIP LOCKED)
 			RETURNING event_id)
 		SELECT `+eventColumns+` FROM usage_events JOIN claimed USING (event_id)`, batch.ID, limit, lease.Seconds(), owner)
@@ -145,64 +145,34 @@ func (r *Repository) AckOutbox(ctx context.Context, batch uuid.UUID) error {
 }
 
 // RetryOutboxLater counts a refusal and makes the batch claimable again after
-// delay, so a refused batch waits while the events behind it flow.
-func (r *Repository) RetryOutboxLater(ctx context.Context, batch uuid.UUID, delay time.Duration) error {
-	_, err := r.pool.Exec(ctx, `
+// delay, so a refused batch waits while the events behind it flow. False: the
+// batch was taken over meanwhile and is not the caller's to postpone.
+func (r *Repository) RetryOutboxLater(ctx context.Context, owner, batch uuid.UUID, delay time.Duration) (bool, error) {
+	tag, err := r.pool.Exec(ctx, `
 		UPDATE clickhouse_outbox SET attempts = attempts + 1, lease_until = now() + make_interval(secs => $2), lease_owner = NULL
-		WHERE event_id IN (`+batchRows+` ORDER BY event_id FOR UPDATE)`, batch, delay.Seconds())
+		WHERE event_id IN (`+batchRows+` AND lease_owner = $3 ORDER BY event_id FOR UPDATE)`, batch, delay.Seconds(), owner)
 	if err != nil {
-		return fmt.Errorf("postpone outbox batch %s: %w", batch, err)
+		return false, fmt.Errorf("postpone outbox batch %s: %w", batch, err)
 	}
-	return nil
+	return tag.RowsAffected() > 0, nil
 }
 
-// SplitOutbox halves a batch ClickHouse keeps refusing, to corner the event at
-// fault; the halves keep attempts. Fresh IDs are safe: ClickHouse stored
-// nothing under a refused token.
-func (r *Repository) SplitOutbox(ctx context.Context, batch uuid.UUID, attempts int) error {
-	_, err := r.pool.Exec(ctx, `
-		WITH locked AS (`+batchRows+` ORDER BY event_id FOR UPDATE),
-		ranked AS (
-			SELECT event_id, row_number() OVER (ORDER BY event_id) <= count(*) OVER () / 2 AS first_half
-			FROM locked)
-		UPDATE clickhouse_outbox o
-		SET batch_id = CASE WHEN ranked.first_half THEN $2::uuid ELSE $3::uuid END,
-			attempts = $4, lease_until = now(), lease_owner = NULL
-		FROM ranked WHERE o.event_id = ranked.event_id`, batch, uuid.New(), uuid.New(), attempts)
+// OutboxBacklog reports how many events wait for ClickHouse and the age of
+// the oldest, zero when none wait.
+func (r *Repository) OutboxBacklog(ctx context.Context) (int64, time.Duration, error) {
+	var (
+		n     int64
+		since *time.Time
+		now   time.Time
+	)
+	err := r.pool.QueryRow(ctx, `SELECT count(*), min(enqueued_at), now() FROM clickhouse_outbox`).Scan(&n, &since, &now)
 	if err != nil {
-		return fmt.Errorf("split outbox batch %s: %w", batch, err)
+		return 0, 0, fmt.Errorf("outbox backlog: %w", err)
 	}
-	return nil
-}
-
-// SetAsideOutbox stops copying an event ClickHouse refuses on its own. It
-// stays in the outbox, and in Postgres reports, until someone retries it.
-func (r *Repository) SetAsideOutbox(ctx context.Context, event uuid.UUID, reason string) error {
-	_, err := r.pool.Exec(ctx, `
-		UPDATE clickhouse_outbox SET batch_id = NULL, lease_until = NULL, lease_owner = NULL, failed_at = now(), failure = $2
-		WHERE event_id = $1`, event, reason)
-	if err != nil {
-		return fmt.Errorf("set aside outbox event %s: %w", event, err)
+	if since == nil {
+		return 0, 0, nil
 	}
-	return nil
-}
-
-// OutboxBacklog reports the events waiting for ClickHouse, the age of the
-// oldest of them, and the events set aside.
-func (r *Repository) OutboxBacklog(ctx context.Context) (waiting int64, oldest time.Duration, setAside int64, err error) {
-	var since *time.Time
-	var now time.Time
-	err = r.pool.QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE failed_at IS NULL), min(enqueued_at) FILTER (WHERE failed_at IS NULL),
-			count(*) FILTER (WHERE failed_at IS NOT NULL), now()
-		FROM clickhouse_outbox`).Scan(&waiting, &since, &setAside, &now)
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("outbox backlog: %w", err)
-	}
-	if since != nil {
-		oldest = now.Sub(*since)
-	}
-	return waiting, oldest, setAside, nil
+	return n, now.Sub(*since), nil
 }
 
 const eventColumns = `event_id, created_at, occurred_at, user_id, project_id, action_id,
@@ -232,15 +202,37 @@ func scanEvents(rows pgx.Rows) ([]*domain.UsageEvent, error) {
 			return nil, fmt.Errorf("scan outbox event: %w", err)
 		}
 		e.Status = domain.Status(status)
-		if len(meta) > 0 {
-			if err := json.Unmarshal(meta, &e.Meta); err != nil {
-				return nil, fmt.Errorf("decode meta of %s: %w", e.EventID, err)
-			}
-		}
+		e.Meta = decodeMeta(meta)
 		events = append(events, &e)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("load outbox events: %w", err)
 	}
 	return events, nil
+}
+
+// decodeMeta never fails a batch: a row written outside the API with
+// non-string meta values gets them as JSON text rather than blocking the copy.
+func decodeMeta(raw []byte) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var flat map[string]string
+	if json.Unmarshal(raw, &flat) == nil {
+		return flat
+	}
+	var loose map[string]json.RawMessage
+	if json.Unmarshal(raw, &loose) != nil {
+		return map[string]string{"_meta": string(raw)}
+	}
+	out := make(map[string]string, len(loose))
+	for k, v := range loose {
+		var str string
+		if json.Unmarshal(v, &str) == nil {
+			out[k] = str
+		} else {
+			out[k] = string(v)
+		}
+	}
+	return out
 }

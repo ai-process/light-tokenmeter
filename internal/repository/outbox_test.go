@@ -43,11 +43,11 @@ func expire(t *testing.T, repo *Repository, batch uuid.UUID) {
 	require.NoError(t, err)
 }
 
-func backlog(t *testing.T, repo *Repository) (waiting, setAside int64) {
+func backlog(t *testing.T, repo *Repository) int64 {
 	t.Helper()
-	waiting, _, setAside, err := repo.OutboxBacklog(context.Background())
+	waiting, _, err := repo.OutboxBacklog(context.Background())
 	require.NoError(t, err)
-	return waiting, setAside
+	return waiting
 }
 
 func TestOutboxClaimAckAndTakeOver(t *testing.T) {
@@ -59,8 +59,7 @@ func TestOutboxClaimAckAndTakeOver(t *testing.T) {
 	_, err := repo.InsertOne(ctx, first)
 	require.NoError(t, err)
 	fill(t, repo, 4)
-	waiting, _ := backlog(t, repo)
-	require.EqualValues(t, 5, waiting)
+	require.EqualValues(t, 5, backlog(t, repo))
 
 	// Claims never hand out an event twice.
 	b1, ev1, err := repo.ClaimOutbox(ctx, owner, 3, time.Minute)
@@ -115,8 +114,7 @@ func TestOutboxClaimAckAndTakeOver(t *testing.T) {
 	ok, err = repo.RenewOutbox(ctx, owner, b2.ID, time.Minute)
 	require.NoError(t, err)
 	require.False(t, ok, "an acknowledged batch cannot be renewed")
-	waiting, _ = backlog(t, repo)
-	require.Zero(t, waiting)
+	require.Zero(t, backlog(t, repo))
 }
 
 // Replicas racing for one expired batch: exactly one gets it.
@@ -155,50 +153,41 @@ func TestOutboxTakeOverHasOneWinner(t *testing.T) {
 	}
 }
 
-func TestOutboxRefusalsPostponeSplitAndSetAside(t *testing.T) {
+func TestOutboxPostponeKeepsTheBatch(t *testing.T) {
 	_, repo := getTestPool(t)
 	repo.WithOutbox()
 	ctx := context.Background()
 	fill(t, repo, 5)
 
-	b, _, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
+	b, events, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
 	require.NoError(t, err)
 	require.Zero(t, b.Attempts)
 
-	// Postponed: not claimable until the delay passes, then back with a count.
-	require.NoError(t, repo.RetryOutboxLater(ctx, b.ID, time.Hour))
+	ok, err := repo.RetryOutboxLater(ctx, uuid.New(), b.ID, time.Hour)
+	require.NoError(t, err)
+	require.False(t, ok, "only the lease owner may postpone")
+
+	// Postponed: not claimable until the delay passes, then back whole, with
+	// the same ID and a count.
+	ok, err = repo.RetryOutboxLater(ctx, owner, b.ID, time.Hour)
+	require.NoError(t, err)
+	require.True(t, ok)
 	none, _, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, uuid.Nil, none.ID)
 	expire(t, repo, b.ID)
-	again, _, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
+	again, evAgain, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, b.ID, again.ID)
 	require.Equal(t, 1, again.Attempts)
+	require.ElementsMatch(t, ids(events), ids(evAgain))
+}
 
-	// Split: two fresh batches covering the same events, claimable at once.
-	require.NoError(t, repo.SplitOutbox(ctx, b.ID, 2))
-	h1, e1, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
-	require.NoError(t, err)
-	h2, e2, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
-	require.NoError(t, err)
-	require.NotEqual(t, b.ID, h1.ID)
-	require.NotEqual(t, b.ID, h2.ID)
-	require.NotEqual(t, h1.ID, h2.ID)
-	require.Equal(t, 2, h1.Attempts, "halves keep the count, so they split again at the next refusal")
-	require.Len(t, append(e1, e2...), 5)
-	require.ElementsMatch(t, []int{2, 3}, []int{len(e1), len(e2)})
-
-	// Set aside: out of every batch, counted apart.
-	require.NoError(t, repo.SetAsideOutbox(ctx, e1[0].EventID, "code: 53"))
-	waiting, setAside := backlog(t, repo)
-	require.EqualValues(t, 4, waiting)
-	require.EqualValues(t, 1, setAside)
-	require.NoError(t, repo.AckOutbox(ctx, h1.ID))
-	require.NoError(t, repo.AckOutbox(ctx, h2.ID))
-	waiting, setAside = backlog(t, repo)
-	require.Zero(t, waiting)
-	require.EqualValues(t, 1, setAside, "acknowledging a batch keeps what was set aside")
+func TestDecodeMetaNeverFails(t *testing.T) {
+	require.Nil(t, decodeMeta(nil))
+	require.Equal(t, map[string]string{"a": "b"}, decodeMeta([]byte(`{"a":"b"}`)))
+	require.Equal(t, map[string]string{"a": "b", "n": "1", "o": `{"x":true}`}, decodeMeta([]byte(`{"a":"b","n":1,"o":{"x":true}}`)))
+	require.Equal(t, map[string]string{"_meta": `[1,2]`}, decodeMeta([]byte(`[1,2]`)))
 }
 
 func TestNoOutboxWithoutClickHouse(t *testing.T) {

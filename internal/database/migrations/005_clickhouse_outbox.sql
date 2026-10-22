@@ -11,13 +11,10 @@ CREATE TABLE IF NOT EXISTS clickhouse_outbox (
     lease_until TIMESTAMPTZ,
     lease_owner UUID,
     -- ClickHouse refusals of this batch, which space its retries out.
-    attempts INT NOT NULL DEFAULT 0,
-    -- Set aside: ClickHouse refuses this event on its own; kept for inspection.
-    failed_at TIMESTAMPTZ,
-    failure TEXT
+    attempts INT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_clickhouse_outbox_pending
-    ON clickhouse_outbox (enqueued_at) WHERE batch_id IS NULL AND failed_at IS NULL;
+    ON clickhouse_outbox (enqueued_at) WHERE batch_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_clickhouse_outbox_lease
     ON clickhouse_outbox (lease_until) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_clickhouse_outbox_batch

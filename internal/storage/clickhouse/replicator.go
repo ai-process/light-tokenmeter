@@ -22,23 +22,8 @@ const (
 	lease      = 2 * time.Minute
 	retryMax   = 15 * time.Second
 	ackTimeout = 10 * time.Second
-	// After this many refusals a batch is halved, and a single event set aside.
-	maxAttempts = 3
-	refusedMax  = 10 * time.Minute
-	// A refusal blames the rows only if the schema is as expected, or
-	// ClickHouse took another insert lately.
-	acceptedWithin = 5 * time.Minute
+	refusedMax = 10 * time.Minute
 )
-
-// insertedColumns are the types insert writes; the expected schema.
-var insertedColumns = map[string]string{
-	"event_id": "UUID", "created_at": "DateTime64(3)", "occurred_at": "Nullable(DateTime64(3))",
-	"timestamp": "DateTime64(3)", "user_id": "String", "project_id": "String", "action_id": "String",
-	"vendor": "LowCardinality(String)", "model": "LowCardinality(String)", "status": "Int16",
-	"duration_ms": "Int64", "tokens_input": "Int64", "tokens_output": "Int64", "tokens_total": "Int64",
-	"error_class": "LowCardinality(String)", "vendor_http_status": "Nullable(Int32)",
-	"meta": "Map(String, String)", "cost_nanousd": "Int64",
-}
 
 // Outbox is the Postgres side: events written there in the same statement as
 // the event itself, leased out in batches until ClickHouse has them.
@@ -46,9 +31,7 @@ type Outbox interface {
 	ClaimOutbox(ctx context.Context, owner uuid.UUID, limit int, lease time.Duration) (repository.OutboxBatch, []*domain.UsageEvent, error)
 	RenewOutbox(ctx context.Context, owner, batch uuid.UUID, lease time.Duration) (bool, error)
 	AckOutbox(ctx context.Context, batch uuid.UUID) error
-	RetryOutboxLater(ctx context.Context, batch uuid.UUID, delay time.Duration) error
-	SplitOutbox(ctx context.Context, batch uuid.UUID, attempts int) error
-	SetAsideOutbox(ctx context.Context, event uuid.UUID, reason string) error
+	RetryOutboxLater(ctx context.Context, owner, batch uuid.UUID, delay time.Duration) (bool, error)
 }
 
 // Replicator copies events from the Postgres outbox to ClickHouse. Nothing is
@@ -61,7 +44,6 @@ type Replicator struct {
 	batchSize int
 	interval  time.Duration
 	retryMax  time.Duration // overridden only by tests
-	accepted  time.Time     // last insert ClickHouse took
 	ctx       context.Context
 	cancel    context.CancelFunc
 	done      chan struct{}
@@ -105,18 +87,9 @@ func (r *Replicator) run() {
 	}
 }
 
-// appendError is ClickHouse's client refusing one event before anything is sent.
-type appendError struct {
-	index int
-	err   error
-}
-
-func (e *appendError) Error() string { return e.err.Error() }
-func (e *appendError) Unwrap() error { return e.err }
-
 // copyBatch copies one batch and reports whether to go on at once. While
-// ClickHouse fails, it holds the batch and retries; a refusal of the rows
-// goes to refused, which postpones, halves or sets aside.
+// ClickHouse fails, the batch is held and retried; when ClickHouse refuses
+// its rows, it is postponed so the events behind it flow.
 func (r *Replicator) copyBatch() bool {
 	batch, events, err := r.outbox.ClaimOutbox(r.ctx, r.id, r.batchSize, lease)
 	if err != nil {
@@ -139,7 +112,8 @@ func (r *Replicator) copyBatch() bool {
 			return false // closing: the batch is copied once its lease ends
 		}
 		if refusesData(err) {
-			return r.refused(log, batch, events, err)
+			r.postpone(log, batch, len(events), err)
+			return false // pace refusals: a broken schema refuses every batch
 		}
 		if !warned {
 			log.Warn().Err(err).Int("events", len(events)).Msg("clickhouse replicator: insert failed, holding the batch and retrying")
@@ -158,7 +132,6 @@ func (r *Replicator) copyBatch() bool {
 			return false
 		}
 	}
-	r.accepted = time.Now()
 	// Not r.ctx: a Close right after the insert must still record it.
 	ackCtx, cancel := context.WithTimeout(context.Background(), ackTimeout)
 	defer cancel()
@@ -176,81 +149,30 @@ var dataErrorCodes = map[int32]bool{
 	72: true, 117: true, 131: true, 321: true, 349: true,
 }
 
+// refusesData reports ClickHouse refusing the rows, on the client while the
+// batch is built, or on the server.
 func refusesData(err error) bool {
 	var bad *appendError
 	var ex *clickhouse.Exception
 	return errors.As(err, &bad) || errors.As(err, &ex) && dataErrorCodes[ex.Code]
 }
 
-// refused handles ClickHouse refusing the rows: nothing was stored under the
-// token, so the batch may be postponed, split or narrowed. Unless ClickHouse
-// takes other inserts, the schema is suspect, and the batch only waits.
-func (r *Replicator) refused(log zerolog.Logger, batch repository.OutboxBatch, events []*domain.UsageEvent, cause error) bool {
-	attempts := batch.Attempts + 1
-	others := !r.accepted.IsZero() && time.Since(r.accepted) < acceptedWithin
-	if !others {
-		mismatch, err := r.schemaMismatch()
-		if err != nil {
-			log.Warn().Err(err).Msg("clickhouse replicator: cannot read the ClickHouse schema")
-		}
-		others = err == nil && mismatch == ""
-		if mismatch != "" {
-			cause = fmt.Errorf("%w (ClickHouse schema: %s)", cause, mismatch)
-		}
-	}
-	var err error
-	switch {
-	case !others:
-		delay := min(r.retryMax<<min(attempts, 6), refusedMax)
-		log.Error().Err(cause).Dur("retry_in", delay).Msg("clickhouse replicator: ClickHouse refuses the batch and its schema is not as expected; waiting")
-		err = r.outbox.RetryOutboxLater(r.ctx, batch.ID, delay)
-	case attempts < maxAttempts:
-		delay := min(r.retryMax<<attempts, refusedMax)
-		log.Warn().Err(cause).Int("attempt", attempts).Dur("retry_in", delay).Msg("clickhouse replicator: ClickHouse refused the batch; retrying later")
-		err = r.outbox.RetryOutboxLater(r.ctx, batch.ID, delay)
-	case len(events) > 1:
-		log.Warn().Err(cause).Int("events", len(events)).Msg("clickhouse replicator: ClickHouse keeps refusing the batch; splitting it")
-		err = r.outbox.SplitOutbox(r.ctx, batch.ID, maxAttempts-1)
-	case len(events) == 1:
-		log.Error().Err(cause).Str("event_id", events[0].EventID.String()).Msg("clickhouse replicator: ClickHouse refuses this event; set aside")
-		err = r.outbox.SetAsideOutbox(r.ctx, events[0].EventID, cause.Error())
-	default:
-		err = r.outbox.AckOutbox(r.ctx, batch.ID)
-	}
-	if err != nil && r.ctx.Err() == nil {
-		log.Error().Err(err).Msg("clickhouse replicator: cannot record the refusal")
-	}
-	// Pause after a suspect schema instead of claiming the whole outbox in a burst.
-	return err == nil && others
-}
+// appendError is ClickHouse's client refusing a value before anything is sent.
+type appendError struct{ err error }
 
-// schemaMismatch names the first usage_events column whose type differs from
-// what insert writes, or "" when all match.
-func (r *Replicator) schemaMismatch() (string, error) {
-	ctx, cancel := context.WithTimeout(r.ctx, insertTimeout)
-	defer cancel()
-	rows, err := r.conn.Query(ctx, "SELECT name, type FROM system.columns WHERE database = currentDatabase() AND table = 'usage_events'")
-	if err != nil {
-		return "", err
+func (e *appendError) Error() string { return e.err.Error() }
+func (e *appendError) Unwrap() error { return e.err }
+
+// postpone keeps the batch, under the same token, for a later retry. It is
+// never split or dropped: a token reused for other rows could count twice.
+func (r *Replicator) postpone(log zerolog.Logger, batch repository.OutboxBatch, n int, cause error) {
+	attempts := batch.Attempts + 1
+	delay := min(r.retryMax<<min(attempts, 6), refusedMax)
+	log.Error().Err(cause).Int("events", n).Int("attempt", attempts).Dur("retry_in", delay).
+		Msg("clickhouse replicator: ClickHouse refused the batch; it waits in the outbox and is retried later")
+	if _, err := r.outbox.RetryOutboxLater(r.ctx, r.id, batch.ID, delay); err != nil && r.ctx.Err() == nil {
+		log.Error().Err(err).Msg("clickhouse replicator: cannot postpone the batch")
 	}
-	defer rows.Close()
-	got := map[string]string{}
-	for rows.Next() {
-		var name, typ string
-		if err := rows.Scan(&name, &typ); err != nil {
-			return "", err
-		}
-		got[name] = typ
-	}
-	if err := rows.Err(); err != nil {
-		return "", err
-	}
-	for name, want := range insertedColumns {
-		if got[name] != want {
-			return fmt.Sprintf("column %s is %q, want %q", name, got[name], want), nil
-		}
-	}
-	return "", nil
 }
 
 // insert writes one batch under its deduplication token: a batch ClickHouse
@@ -280,7 +202,7 @@ func (r *Replicator) insert(ctx context.Context, batch uuid.UUID, events []*doma
 		return fmt.Errorf("prepare clickhouse batch: %w", err)
 	}
 
-	for i, ev := range events {
+	for _, ev := range events {
 		createdAt := ev.CreatedAt
 		if createdAt.IsZero() {
 			createdAt = time.Now()
@@ -324,7 +246,7 @@ func (r *Replicator) insert(ctx context.Context, batch uuid.UUID, events []*doma
 		)
 		if err != nil {
 			_ = b.Abort()
-			return &appendError{index: i, err: fmt.Errorf("append event to batch: %w", err)}
+			return &appendError{err: fmt.Errorf("append event %s to batch: %w", ev.EventID, err)}
 		}
 	}
 

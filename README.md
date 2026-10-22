@@ -337,26 +337,24 @@ Postgres is always the record. With `CLICKHOUSE_ENABLED=true`:
   the background and `/readyz` reports `"clickhouse":"unavailable"` meanwhile, without failing.
 - **ClickHouse unreachable** (or failing for reasons not about the rows): the replica keeps its
   batch, renews its two-minute lease, and retries with backoff up to 15 s apart. Nothing is
-  dropped or set aside, and writes keep working; the outbox drains once ClickHouse is back.
-- **ClickHouse refusing rows** (a data error such as a type mismatch): the batch is retried 30 s and
-  60 s later while the events behind it flow, then halved, and halved again, until the one event
-  at fault is **set aside**: it stays in `clickhouse_outbox` with `failed_at` and the error in
-  `failure`, and is missing from reports served by ClickHouse. This happens only while
-  ClickHouse's `usage_events` has the expected columns (or took other inserts in the last five
-  minutes); after a schema change the batches just wait and an error names the column that
-  differs. To retry set-aside events after fixing the cause:
-  `UPDATE clickhouse_outbox SET failed_at = NULL, failure = NULL WHERE failed_at IS NOT NULL`.
+  dropped, and writes keep working; the outbox drains once ClickHouse is back.
+- **ClickHouse refusing rows** (a data error such as a type mismatch, often a changed schema): the
+  batch is postponed, 30 s and then up to 10 minutes later, while the events behind it flow. It
+  keeps its deduplication token and is never split or dropped, so it cannot be counted twice; an
+  error with the batch ID and ClickHouse's message is logged on every refusal. Fix the cause and
+  the batch goes through at its next retry.
 - **Restart or crash**: waiting events stay in the outbox. A batch inserted but not yet removed
   is taken over when its lease ends and inserted again under the same deduplication token;
   ClickHouse ignores the repeat, as it remembers the last 100 000 inserts
   (`non_replicated_deduplication_window`; a `ReplicatedMergeTree` you create yourself needs
   `replicated_deduplication_window`).
 
-Set `CLICKHOUSE_ENABLED` the same on every replica: an event written by a replica with it off is
-never queued for ClickHouse.
+Migrations need a ClickHouse user allowed to create and alter `usage_events`; until they apply,
+the service records to Postgres and logs the error. Set `CLICKHOUSE_ENABLED` the same on every
+replica: an event written by a replica with it off is never queued for ClickHouse.
 
-Events recorded before ClickHouse was turned on, or while it was off, are not copied; Postgres reports still include
-them. Versions before 1.0 kept events in memory and could drop them; to rebuild ClickHouse from
+Events recorded before ClickHouse was turned on, or while it was off, are not copied; Postgres
+reports still include them. Versions before 1.0 kept events in memory and could drop them; to rebuild ClickHouse from
 Postgres, empty its `usage_events` table and run
 `INSERT INTO clickhouse_outbox (event_id) SELECT event_id FROM usage_events ON CONFLICT DO NOTHING`
 in Postgres.
