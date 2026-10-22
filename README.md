@@ -2,7 +2,7 @@
 
 [![Test](https://github.com/ai-process/light-tokenmeter/actions/workflows/test.yml/badge.svg)](https://github.com/ai-process/light-tokenmeter/actions/workflows/test.yml)
 [![Docker image](https://img.shields.io/docker/v/coyl/light-tokenmeter?label=docker%20hub&sort=semver)](https://hub.docker.com/r/coyl/light-tokenmeter)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
 A very small service that answers one question: **who is spending your LLM tokens, and
 are they worth it?** Your apps (or a gateway such as
@@ -308,4 +308,4 @@ Pull requests are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
-[MIT](LICENSE)
+[Apache 2.0](LICENSE)
