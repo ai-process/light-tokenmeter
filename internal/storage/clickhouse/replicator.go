@@ -14,10 +14,13 @@ import (
 )
 
 const (
-	insertTimeout = 30 * time.Second
-	// staleAfter must outlast an insert, or a live replica's batch is taken over.
-	staleAfter = 2 * insertTimeout
-	retryMax   = 30 * time.Second
+	insertTimeout = 20 * time.Second
+	// A replica gives up a batch after holdFor, well before others may take it
+	// over at staleAfter, so two replicas never copy one batch at once.
+	holdFor    = time.Minute
+	staleAfter = 2 * holdFor
+	retryMax   = 15 * time.Second
+	ackTimeout = 10 * time.Second
 )
 
 // Outbox is the Postgres side: events written there in the same statement as
@@ -35,6 +38,8 @@ type Replicator struct {
 	conn      driver.Conn
 	batchSize int
 	interval  time.Duration
+	holdFor   time.Duration // overridden only by tests
+	stale     time.Duration
 	ctx       context.Context // cancelled by Close, cutting a claim or insert short
 	cancel    context.CancelFunc
 	done      chan struct{}
@@ -51,10 +56,9 @@ func NewReplicator(outbox Outbox, conn driver.Conn, batchSize int, interval time
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Replicator{outbox: outbox, conn: conn, batchSize: batchSize, interval: interval,
-		ctx: ctx, cancel: cancel, done: make(chan struct{})}
+		holdFor: holdFor, stale: staleAfter, ctx: ctx, cancel: cancel, done: make(chan struct{})}
 }
 
-// Start launches the copy loop.
 func (r *Replicator) Start() { go r.run() }
 
 // Close stops the loop. A batch it was copying stays claimed in the outbox and
@@ -79,13 +83,13 @@ func (r *Replicator) run() {
 	}
 }
 
-// copyBatch copies one batch, retrying ClickHouse until it takes it, and
-// reports whether a full batch suggests more are waiting.
+// copyBatch copies one batch and reports whether a full batch suggests more
+// are waiting. A batch ClickHouse keeps refusing is released after holdFor
+// and retried once stale, so it cannot stall the events behind it.
 func (r *Replicator) copyBatch() bool {
-	ctx := r.ctx
-	batch, events, err := r.outbox.ClaimOutbox(ctx, r.batchSize, staleAfter)
+	batch, events, err := r.outbox.ClaimOutbox(r.ctx, r.batchSize, r.stale)
 	if err != nil {
-		if ctx.Err() == nil {
+		if r.ctx.Err() == nil {
 			log.Error().Err(err).Msg("clickhouse replicator: cannot read the outbox")
 		}
 		return false
@@ -93,24 +97,32 @@ func (r *Replicator) copyBatch() bool {
 	if batch == uuid.Nil {
 		return false
 	}
+	hold, cancel := context.WithTimeout(r.ctx, r.holdFor)
+	defer cancel()
 	for backoff := r.interval; ; backoff = min(2*backoff, retryMax) {
-		err := r.insert(ctx, batch, events)
+		err := r.insert(hold, batch, events)
 		if err == nil {
 			break
 		}
-		if ctx.Err() != nil {
+		if r.ctx.Err() != nil {
+			return false // closing: the batch is taken over once stale
+		}
+		if hold.Err() != nil {
+			log.Error().Err(err).Str("batch", batch.String()).Int("events", len(events)).
+				Msg("clickhouse replicator: giving the batch up for now; it is retried once stale")
 			return false
 		}
 		log.Warn().Err(err).Int("events", len(events)).Msg("clickhouse replicator: insert failed, events stay in the outbox and are retried")
 		select {
 		case <-time.After(backoff):
-		case <-ctx.Done():
-			return false
+		case <-hold.Done():
 		}
 	}
-	if err := r.outbox.AckOutbox(ctx, batch); err != nil {
-		// The batch is retried once stale; ClickHouse skips it by its token.
-		log.Error().Err(err).Msg("clickhouse replicator: cannot acknowledge a copied batch")
+	// Not r.ctx: a Close right after the insert must still record it.
+	ackCtx, ackCancel := context.WithTimeout(context.Background(), ackTimeout)
+	defer ackCancel()
+	if err := r.outbox.AckOutbox(ackCtx, batch); err != nil {
+		log.Error().Err(err).Msg("clickhouse replicator: cannot acknowledge a copied batch; ClickHouse skips it when retried")
 		return false
 	}
 	return len(events) >= r.batchSize

@@ -2,10 +2,12 @@ package repository
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ai-process/light-tokenmeter/internal/domain"
@@ -55,20 +57,20 @@ func TestOutboxClaimAckAndReclaim(t *testing.T) {
 	require.Empty(t, ev3)
 
 	// Events come back as they were stored.
-	var got *domain.UsageEvent
+	var stored *domain.UsageEvent
 	for _, e := range append(ev1, ev2...) {
 		if e.EventID == first.EventID {
-			got = e
+			stored = e
 		}
 	}
-	require.NotNil(t, got)
-	require.Equal(t, first.Meta, got.Meta)
-	require.Equal(t, first.OccurredAt.Unix(), got.OccurredAt.Unix())
-	require.Equal(t, first.Status, got.Status)
-	require.Equal(t, first.ErrorClass, got.ErrorClass)
-	require.Equal(t, first.VendorHTTPStatus, got.VendorHTTPStatus)
-	require.Equal(t, first.CostNanoUSD, got.CostNanoUSD)
-	require.False(t, got.CreatedAt.IsZero())
+	require.NotNil(t, stored)
+	require.Equal(t, first.Meta, stored.Meta)
+	require.Equal(t, first.OccurredAt.Unix(), stored.OccurredAt.Unix())
+	require.Equal(t, first.Status, stored.Status)
+	require.Equal(t, first.ErrorClass, stored.ErrorClass)
+	require.Equal(t, first.VendorHTTPStatus, stored.VendorHTTPStatus)
+	require.Equal(t, first.CostNanoUSD, stored.CostNanoUSD)
+	require.False(t, stored.CreatedAt.IsZero())
 
 	require.NoError(t, repo.AckOutbox(ctx, b1))
 
@@ -80,6 +82,29 @@ func TestOutboxClaimAckAndReclaim(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, b2, again)
 	require.ElementsMatch(t, ids(ev2), ids(evAgain))
+
+	// A batch just reclaimed is fresh again: nobody else takes it over.
+	_, err = pool.Exec(ctx, "UPDATE clickhouse_outbox SET claimed_at = now() - interval '10 minutes' WHERE batch_id = $1", b2)
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	got := make([]uuid.UUID, 4)
+	for i := range got {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b, _, err := repo.ClaimOutbox(ctx, 3, time.Minute)
+			assert.NoError(t, err)
+			got[i] = b
+		}()
+	}
+	wg.Wait()
+	takers := 0
+	for _, b := range got {
+		if b == b2 {
+			takers++
+		}
+	}
+	require.Equal(t, 1, takers, "concurrent reclaims must hand a stale batch to one replica: %v", got)
 
 	require.NoError(t, repo.AckOutbox(ctx, b2))
 	n, _, err = repo.OutboxBacklog(ctx)

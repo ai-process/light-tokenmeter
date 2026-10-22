@@ -333,12 +333,18 @@ Postgres is always the record. With `CLICKHOUSE_ENABLED=true`:
 - **Reads**: `/v1/usage/summary`, `GetUsageSummary` and `GetUsageByMeta` are answered from
   ClickHouse, so they trail writes by about one flush interval.
 - **ClickHouse down**: events wait in the outbox and the insert is retried with backoff (up to
-  30 s apart); nothing is dropped and writes keep working. The outbox drains once ClickHouse is back.
+  15 s apart); nothing is dropped and writes keep working. The outbox drains once ClickHouse is back.
+  A batch ClickHouse keeps refusing is set aside after a minute and retried two minutes after it was
+  taken, so it never holds up the events behind it.
 - **Restart or crash**: waiting events stay in the outbox. A batch inserted but not yet removed
-  is inserted again a minute later under the same deduplication token, and ClickHouse ignores the
-  repeat (the table keeps the last 1000 tokens, `non_replicated_deduplication_window`).
+  is inserted again two minutes later under the same deduplication token, and ClickHouse ignores
+  the repeat: the table remembers the last 100 000 inserts (`non_replicated_deduplication_window`;
+  a `ReplicatedMergeTree` you create yourself needs `replicated_deduplication_window`).
 
-Events recorded before ClickHouse was turned on are not copied; Postgres reports still include
+Set `CLICKHOUSE_ENABLED` the same on every replica: an event written by a replica with it off is
+never queued for ClickHouse.
+
+Events recorded before ClickHouse was turned on, or while it was off, are not copied; Postgres reports still include
 them. Versions before 1.0 kept events in memory and could drop them; to rebuild ClickHouse from
 Postgres, empty its `usage_events` table and run
 `INSERT INTO clickhouse_outbox (event_id) SELECT event_id FROM usage_events ON CONFLICT DO NOTHING`

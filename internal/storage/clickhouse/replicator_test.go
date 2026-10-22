@@ -23,6 +23,12 @@ type flakyConn struct {
 	fails int
 }
 
+func (c *flakyConn) setFails(n int) {
+	c.mu.Lock()
+	c.fails = n
+	c.mu.Unlock()
+}
+
 func (c *flakyConn) PrepareBatch(ctx context.Context, query string, opts ...driver.PrepareBatchOption) (driver.Batch, error) {
 	c.mu.Lock()
 	down := c.fails > 0
@@ -96,7 +102,7 @@ func TestReplicatorKeepsClickHouseInStepWithPostgres(t *testing.T) {
 	require.True(t, down.copyBatch(), "a full batch, once ClickHouse is back")
 
 	// A batch reaches ClickHouse but the process dies before acknowledging it.
-	batch, events, err := repo.ClaimOutbox(ctx, 200, staleAfter)
+	batch, events, err := repo.ClaimOutbox(ctx, 200, time.Hour)
 	require.NoError(t, err)
 	require.NoError(t, down.insert(ctx, batch, events))
 	_, err = pool.Exec(ctx, "UPDATE clickhouse_outbox SET claimed_at = now() - interval '1 hour' WHERE batch_id = $1", batch)
@@ -120,6 +126,54 @@ func TestReplicatorKeepsClickHouseInStepWithPostgres(t *testing.T) {
 	want := pgTotals(t, repo, from, to)
 	require.EqualValues(t, 1200, want.requests)
 	require.Equal(t, want, chTotals(t, ch, from, to), "ClickHouse totals must match Postgres")
+}
+
+// A batch ClickHouse keeps refusing is given up after holdFor: the events
+// behind it still flow, and it is copied once stale and accepted.
+func TestRefusedBatchDoesNotStallReplication(t *testing.T) {
+	ch := getTestClient(t)
+	pool := testdb.Postgres(t)
+	if ch == nil || pool == nil {
+		return
+	}
+	repo := repository.New(pool).WithOutbox()
+	ctx := context.Background()
+	from := time.Now().Add(-time.Hour)
+	add := func() {
+		at := time.Now().UTC()
+		_, err := repo.InsertOne(ctx, &domain.UsageEvent{
+			EventID: uuid.New(), OccurredAt: &at, UserID: "u", ProjectID: "p", ActionID: "a",
+			Vendor: "openai", Model: "m", Status: domain.StatusSuccess, TokensTotal: 5, CostNanoUSD: 7,
+		})
+		require.NoError(t, err)
+	}
+	for i := 0; i < 3; i++ {
+		add()
+	}
+
+	conn := &flakyConn{Conn: ch.Conn(), fails: 1 << 30}
+	r := NewReplicator(repo, conn, 3, 5*time.Millisecond)
+	r.holdFor, r.stale = 50*time.Millisecond, time.Hour
+	start := time.Now()
+	require.False(t, r.copyBatch(), "the refused batch is given up")
+	require.Less(t, time.Since(start), 5*time.Second)
+
+	conn.setFails(0)
+	for i := 0; i < 2; i++ {
+		add()
+	}
+	require.False(t, r.copyBatch(), "newer events are copied past the refused batch")
+	n, _, err := repo.OutboxBacklog(ctx)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, n, "only the refused batch waits")
+
+	r.stale = 0
+	r.copyBatch()
+	n, _, err = repo.OutboxBacklog(ctx)
+	require.NoError(t, err)
+	require.Zero(t, n)
+	to := time.Now().Add(time.Hour)
+	require.Equal(t, pgTotals(t, repo, from, to), chTotals(t, ch, from, to))
 }
 
 // Close cuts a retry loop short and leaves the batch claimed for the next start.
