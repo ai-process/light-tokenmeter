@@ -73,22 +73,25 @@ type UsageEvent struct {
 
 // Validation errors
 var (
-	ErrInvalidEventID   = errors.New("invalid event_id: must be a valid UUID")
-	ErrEmptyUserID      = errors.New("user_id is required")
-	ErrEmptyProjectID   = errors.New("project_id is required")
-	ErrEmptyActionID    = errors.New("action_id is required")
-	ErrEmptyVendor      = errors.New("vendor is required")
-	ErrEmptyModel       = errors.New("model is required")
-	ErrInvalidStatus    = errors.New("status must be one of: success, error, cancelled, timeout")
-	ErrUserIDTooLong    = errors.New("user_id exceeds 256 characters")
-	ErrProjectIDTooLong = errors.New("project_id exceeds 256 characters")
-	ErrActionIDTooLong  = errors.New("action_id exceeds 256 characters")
-	ErrVendorTooLong    = errors.New("vendor exceeds 64 characters")
-	ErrModelTooLong     = errors.New("model exceeds 128 characters")
-	ErrTokensMismatch   = errors.New("tokens_total must equal tokens_input + tokens_output")
-	ErrNegativeCost     = errors.New("cost_nanousd must not be negative")
-	ErrOccurredAtRange  = errors.New("occurred_at must be between 1900-01-01 and 2262-04-10")
-	ErrBatchTooLarge    = errors.New("batch size exceeds maximum of 500 events")
+	ErrInvalidEventID    = errors.New("invalid event_id: must be a valid UUID")
+	ErrEmptyUserID       = errors.New("user_id is required")
+	ErrEmptyProjectID    = errors.New("project_id is required")
+	ErrEmptyActionID     = errors.New("action_id is required")
+	ErrEmptyVendor       = errors.New("vendor is required")
+	ErrEmptyModel        = errors.New("model is required")
+	ErrInvalidStatus     = errors.New("status must be one of: success, error, cancelled, timeout")
+	ErrUserIDTooLong     = errors.New("user_id exceeds 256 characters")
+	ErrProjectIDTooLong  = errors.New("project_id exceeds 256 characters")
+	ErrActionIDTooLong   = errors.New("action_id exceeds 256 characters")
+	ErrVendorTooLong     = errors.New("vendor exceeds 64 characters")
+	ErrModelTooLong      = errors.New("model exceeds 128 characters")
+	ErrTokensMismatch    = errors.New("tokens_total must equal tokens_input + tokens_output")
+	ErrNegativeCost      = errors.New("cost_nanousd must not be negative")
+	ErrOccurredAtRange   = errors.New("occurred_at must be between 1900-01-01 and 2262-04-10")
+	ErrErrorClassTooLong = errors.New("error_class exceeds 256 characters")
+	ErrMetaTooLarge      = errors.New("meta exceeds 16384 bytes of keys and values")
+	ErrMetaEmptyKey      = errors.New("meta keys must not be empty")
+	ErrBatchTooLarge     = errors.New("batch size exceeds maximum of 500 events")
 )
 
 const (
@@ -96,6 +99,9 @@ const (
 	MaxVendorLength = 64
 	MaxModelLength  = 128
 	MaxBatchSize    = 500
+	MaxMetaBytes    = 16 << 10
+	// MaxRequestBytes bounds one request: a full batch of events at their limits.
+	MaxRequestBytes = 16 << 20
 )
 
 var (
@@ -143,6 +149,19 @@ func (e *UsageEvent) Validate() error {
 	}
 	if e.CostNanoUSD < 0 {
 		return ErrNegativeCost
+	}
+	if len(e.ErrorClass) > MaxStringLength {
+		return ErrErrorClassTooLong
+	}
+	metaBytes := 0
+	for k, v := range e.Meta {
+		if k == "" {
+			return ErrMetaEmptyKey
+		}
+		metaBytes += len(k) + len(v)
+	}
+	if metaBytes > MaxMetaBytes {
+		return ErrMetaTooLarge
 	}
 	// Go's zero time is what clients send for "unset"; anything else must fit
 	// what the ClickHouse driver can encode, or it would be corrupted there.

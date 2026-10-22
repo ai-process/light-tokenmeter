@@ -47,6 +47,7 @@ var grpcScopes = map[string]auth.Scope{
 // service. A nil or empty verifier serves without authentication.
 func NewGRPCServerWithService(usageService *service.UsageService, addr string, verifier *auth.Verifier) *GRPCServer {
 	srv := grpc.NewServer(
+		grpc.MaxRecvMsgSize(domain.MaxRequestBytes),
 		// Auth runs first, so refusals are logged at Warn rather than as errors.
 		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(verifier, grpcScopes), loggingInterceptor),
 		grpc.StreamInterceptor(auth.StreamInterceptor(verifier)),

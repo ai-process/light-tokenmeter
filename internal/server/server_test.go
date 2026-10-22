@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/ai-process/light-tokenmeter/internal/auth"
+	"github.com/ai-process/light-tokenmeter/internal/domain"
 
 	pb "github.com/ai-process/light-tokenmeter/gen/usage/v1"
 )
@@ -240,4 +242,26 @@ func TestGRPCScopesCoverEveryRPC(t *testing.T) {
 		_, ok := grpcScopes[full]
 		assert.True(t, ok, "%s has no scope", full)
 	}
+}
+
+// KTMS drops the event this message names and resends the rest; the prefix
+// is part of the 1.x API (README "API stability").
+func TestRejectedBatchNamesTheBadEvent(t *testing.T) {
+	srv := NewGRPCServerWithService(nil, "", nil)
+	good := &pb.UsageEvent{EventId: uuid.NewString(), UserId: "u", ProjectId: "p", ActionId: "a",
+		Vendor: "openai", Model: "m", Status: pb.Status_STATUS_SUCCESS}
+	bad := &pb.UsageEvent{EventId: "not-a-uuid"}
+	_, err := srv.RecordUsageEvents(context.Background(), &pb.RecordUsageEventsRequest{Events: []*pb.UsageEvent{good, bad}})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	assert.True(t, strings.HasPrefix(status.Convert(err).Message(), "invalid event at index 1: "), status.Convert(err).Message())
+}
+
+func TestHTTPServer_BodyLimit(t *testing.T) {
+	h := NewHTTPServer(nil, ":0").server.Handler
+	big := bytes.Repeat([]byte(" "), domain.MaxRequestBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/v1/usage/events:batch", bytes.NewReader(big))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+	assert.Contains(t, w.Body.String(), `"code":"request_too_large"`)
 }
