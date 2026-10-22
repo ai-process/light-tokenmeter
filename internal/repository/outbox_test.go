@@ -209,3 +209,33 @@ func ids(events []*domain.UsageEvent) []uuid.UUID {
 	}
 	return out
 }
+
+func TestBackfillOutboxRunsOnce(t *testing.T) {
+	_, repo := getTestPool(t)
+	ctx := context.Background()
+	fill(t, repo, 4) // recorded before ClickHouse was turned on: no outbox rows
+	repo.WithOutbox()
+	require.Zero(t, backlog(t, repo))
+
+	empty := func(context.Context) (bool, error) { return true, nil }
+	n, err := repo.BackfillOutbox(ctx, empty)
+	require.NoError(t, err)
+	require.EqualValues(t, 4, n)
+	require.EqualValues(t, 4, backlog(t, repo))
+
+	n, err = repo.BackfillOutbox(ctx, empty)
+	require.NoError(t, err)
+	require.Zero(t, n, "a second start must not queue the history again")
+}
+
+func TestBackfillOutboxSkipsAFedClickHouse(t *testing.T) {
+	_, repo := getTestPool(t)
+	ctx := context.Background()
+	fill(t, repo, 3)
+	n, err := repo.BackfillOutbox(ctx, func(context.Context) (bool, error) { return false, nil })
+	require.NoError(t, err)
+	require.Zero(t, n, "ClickHouse already holds events: copying them again would count them twice")
+	n, err = repo.BackfillOutbox(ctx, func(context.Context) (bool, error) { return true, nil })
+	require.NoError(t, err)
+	require.Zero(t, n, "the decision is made once")
+}

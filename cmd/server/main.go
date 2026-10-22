@@ -174,7 +174,15 @@ func startClickHouse(parent context.Context, cfg *config.Config, repo *repositor
 				Password: cfg.ClickHousePassword,
 			})
 			if err == nil {
-				if err = client.EnsureSchema(ctx); err != nil {
+				err = client.EnsureSchema(ctx)
+				var queued int64
+				if err == nil {
+					queued, err = repo.BackfillOutbox(ctx, client.Empty)
+				}
+				if queued > 0 {
+					log.Info().Int64("events", queued).Msg("ClickHouse is empty: queued the Postgres history for it")
+				}
+				if err != nil {
 					_ = client.Close()
 				}
 			}
