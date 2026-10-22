@@ -2,10 +2,7 @@ package clickhouse
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,47 +32,58 @@ func getTestClient(t *testing.T) *Client {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	name := fmt.Sprintf("%s%d_%s", testPrefix, time.Now().Unix(), uuid.NewString()[:8])
-	client, err := Connect(ctx, Config{
+	cfg := Config{
 		Addr:     envOr("CLICKHOUSE_TEST_ADDR", "localhost:9000"),
-		Database: name,
+		Database: "default",
 		User:     envOr("CLICKHOUSE_TEST_USER", "tokenmeter"),
 		Password: envOr("CLICKHOUSE_TEST_PASSWORD", "tokenmeter"),
-	})
+	}
+	admin, err := Connect(ctx, cfg)
 	if err != nil {
 		testdb.Unavailable(t, "cannot use test clickhouse: %v", err)
 		return nil
 	}
+	t.Cleanup(func() { _ = admin.Close() })
+	var now time.Time
+	require.NoError(t, admin.conn.QueryRow(ctx, "SELECT now()").Scan(&now))
+	sweepOnce.Do(func() { sweepStale(t, admin, now.Unix()) })
+
+	cfg.Database = testdb.Name(testPrefix, now.Unix())
+	client, err := Connect(ctx, cfg)
+	if err != nil {
+		t.Fatalf("create test database %s: %v", cfg.Database, err)
+	}
 	t.Cleanup(func() {
-		if err := client.conn.Exec(context.Background(), "DROP DATABASE IF EXISTS `"+name+"`"); err != nil {
-			t.Logf("drop test database %s: %v", name, err)
+		if err := admin.conn.Exec(context.Background(), "DROP DATABASE IF EXISTS `"+cfg.Database+"`"); err != nil {
+			t.Logf("drop test database %s: %v", cfg.Database, err)
 		}
 		if err := client.Close(); err != nil {
 			t.Errorf("close clickhouse: %v", err)
 		}
 	})
-	sweepOnce.Do(func() { sweepStale(ctx, t, client) })
 	require.NoError(t, client.EnsureSchema(ctx))
 	return client
 }
 
-// sweepStale drops test databases an interrupted run left behind.
-func sweepStale(ctx context.Context, t *testing.T, c *Client) {
+// sweepStale drops test databases an interrupted run left behind, with its
+// own deadline so the cleanup never eats the test's setup time.
+func sweepStale(t *testing.T, c *Client, now int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 	rows, err := c.conn.Query(ctx, "SELECT name FROM system.databases WHERE startsWith(name, ?)", testPrefix)
 	if err != nil {
+		t.Logf("list stale test databases: %v", err)
 		return
 	}
 	var stale []string
 	for rows.Next() {
 		var name string
-		if rows.Scan(&name) != nil {
-			continue
-		}
-		ts, _, _ := strings.Cut(strings.TrimPrefix(name, testPrefix), "_")
-		if sec, err := strconv.ParseInt(ts, 10, 64); err == nil && time.Since(time.Unix(sec, 0)) > time.Hour {
+		if err := rows.Scan(&name); err == nil && testdb.IsStale(name, testPrefix, now) {
 			stale = append(stale, name)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Logf("list stale test databases: %v", err)
 	}
 	_ = rows.Close()
 	for _, name := range stale {
@@ -136,4 +144,24 @@ func TestClickHouse_CostAggregation(t *testing.T) {
 		total += r.CostNanoUSD
 	}
 	assert.Equal(t, int64(3_150_000), total)
+}
+
+// A least-privilege user without CREATE DATABASE must still connect to the
+// database it was given, and get a clear error for one that is missing.
+func TestConnectWithoutCreateDatabaseGrant(t *testing.T) {
+	client := getTestClient(t)
+	ctx := context.Background()
+	user := "tm_ro_" + uuid.NewString()[:8]
+	require.NoError(t, client.conn.Exec(ctx, "CREATE USER "+user+" IDENTIFIED BY 'pw'"))
+	t.Cleanup(func() { _ = client.conn.Exec(context.Background(), "DROP USER IF EXISTS "+user) })
+	require.NoError(t, client.conn.Exec(ctx, "GRANT SELECT, INSERT ON `"+client.cfg.Database+"`.* TO "+user))
+
+	cfg := Config{Addr: client.cfg.Addr, Database: client.cfg.Database, User: user, Password: "pw"}
+	limited, err := Connect(ctx, cfg)
+	require.NoError(t, err, "an existing database needs no CREATE DATABASE grant")
+	require.NoError(t, limited.Close())
+
+	cfg.Database = client.cfg.Database + "_missing"
+	_, err = Connect(ctx, cfg)
+	require.ErrorContains(t, err, "create clickhouse database")
 }

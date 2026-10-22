@@ -24,7 +24,6 @@ func getTestPool(t *testing.T) (*pgxpool.Pool, *Repository) {
 func TestExplainJobIdIndex(t *testing.T) {
 	pool, repo := getTestPool(t)
 	ctx := context.Background()
-	var err error
 
 	events := make([]*domain.UsageEvent, 0, 500)
 	for i := 0; i < 500; i++ {
@@ -42,7 +41,7 @@ func TestExplainJobIdIndex(t *testing.T) {
 			Meta:         map[string]string{"job_id": fmt.Sprintf("job-%d", i%10)},
 		})
 	}
-	_, err = repo.InsertBatch(ctx, events)
+	_, err := repo.InsertBatch(ctx, events)
 	require.NoError(t, err)
 
 	_, err = pool.Exec(ctx, "VACUUM ANALYZE usage_events;")
@@ -74,13 +73,12 @@ func TestExplainJobIdIndex(t *testing.T) {
 func TestQuerySummary_OccurredAt(t *testing.T) {
 	_, repo := getTestPool(t)
 	ctx := context.Background()
-	var err error
 
 	now := time.Now().UTC()
 	occurred3DaysAgo := now.Add(-72 * time.Hour)
 
 	// Insert event with past occurred_at
-	_, err = repo.InsertOne(ctx, &domain.UsageEvent{
+	_, err := repo.InsertOne(ctx, &domain.UsageEvent{
 		EventID:      uuid.New(),
 		OccurredAt:   &occurred3DaysAgo,
 		UserID:       "backfill-user",
@@ -119,7 +117,6 @@ func TestQuerySummary_OccurredAt(t *testing.T) {
 func TestQuerySummary_TruncatedFlag(t *testing.T) {
 	pool, repo := getTestPool(t)
 	ctx := context.Background()
-	var err error
 
 	now := time.Now().UTC()
 
@@ -145,7 +142,7 @@ func TestQuerySummary_TruncatedFlag(t *testing.T) {
 			30
 		FROM generate_series(1, 10005) AS s(i);
 	`
-	_, err = pool.Exec(ctx, insertSQL, now)
+	_, err := pool.Exec(ctx, insertSQL, now)
 	require.NoError(t, err)
 
 	rows, truncated, err := repo.QuerySummary(ctx, domain.SummaryParams{
@@ -161,7 +158,6 @@ func TestQuerySummary_TruncatedFlag(t *testing.T) {
 func TestQueryUsageByMeta_TruncatedFlag(t *testing.T) {
 	pool, repo := getTestPool(t)
 	ctx := context.Background()
-	var err error
 
 	// Insert 10005 events with same job_id but different group_by_meta_key values
 	insertSQL := `
@@ -183,7 +179,7 @@ func TestQueryUsageByMeta_TruncatedFlag(t *testing.T) {
 			jsonb_build_object('job_id', 'job-xyz', 'task_id', 'task-' || i::text)
 		FROM generate_series(1, 10005) AS s(i);
 	`
-	_, err = pool.Exec(ctx, insertSQL)
+	_, err := pool.Exec(ctx, insertSQL)
 	require.NoError(t, err)
 
 	rows, truncated, err := repo.QueryUsageByMeta(ctx, domain.MetaUsageParams{
@@ -199,7 +195,6 @@ func TestQueryUsageByMeta_TruncatedFlag(t *testing.T) {
 func TestCostAggregation(t *testing.T) {
 	_, repo := getTestPool(t)
 	ctx := context.Background()
-	var err error
 
 	newEvent := func(model string, cost int64) *domain.UsageEvent {
 		return &domain.UsageEvent{
@@ -218,7 +213,7 @@ func TestCostAggregation(t *testing.T) {
 		}
 	}
 
-	_, err = repo.InsertOne(ctx, newEvent("gpt-4o", 1_000_000))
+	_, err := repo.InsertOne(ctx, newEvent("gpt-4o", 1_000_000))
 	require.NoError(t, err)
 	_, err = repo.InsertBatch(ctx, []*domain.UsageEvent{
 		newEvent("gpt-4o", 2_000_000),
