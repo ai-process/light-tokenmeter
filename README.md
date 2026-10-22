@@ -131,7 +131,7 @@ An event describes one model call:
 | `vendor` | string ≤64 | yes | `openai`, `anthropic`, `google`, … (free-form). |
 | `model` | string ≤128 | yes | Model name. |
 | `status` | string | yes | `success`, `error`, `cancelled` or `timeout`. |
-| `occurred_at` | RFC 3339 | no | When it happened, between 1900 and 2299; the server's clock is used otherwise. |
+| `occurred_at` | RFC 3339 | no | When it happened, from 1900 to April 2262; the server's clock is used when it is missing or the zero time. |
 | `duration_ms` | int | no | Call latency. |
 | `tokens_input`, `tokens_output` | int | no | Token counts. |
 | `tokens_total` | int | no | Defaults to input + output; if given it must equal that sum. |
@@ -334,10 +334,12 @@ Postgres is always the record. With `CLICKHOUSE_ENABLED=true`:
   ClickHouse, so they trail writes by about one flush interval. If ClickHouse fails a query, or
   is not reachable yet, the answer comes from Postgres.
 - **Startup and readiness**: the service starts and is ready without ClickHouse; it connects in
-  the background and `/readyz` reports `"clickhouse":"unavailable"` meanwhile, without failing.
+  the background and `/readyz` reports `"clickhouse":"unavailable"` meanwhile (or while it is
+  down), without failing.
 - **ClickHouse unreachable** (or failing for reasons not about the rows): the replica keeps its
-  batch, renews its two-minute lease, and retries with backoff up to 15 s apart. Nothing is
-  dropped, and writes keep working; the outbox drains once ClickHouse is back.
+  batch, renews its two-minute lease, and retries with backoff up to 15 s apart. A batch still
+  failing after five minutes is postponed like a refused one, in case the trouble is its own.
+  Nothing is dropped, and writes keep working; the outbox drains once ClickHouse is back.
 - **ClickHouse refusing rows** (a data error such as a type mismatch, often a changed schema): the
   batch is postponed, 30 s and then up to 10 minutes later, while the events behind it flow. It
   keeps its deduplication token and is never split or dropped, so it cannot be counted twice; an

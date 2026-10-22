@@ -100,7 +100,9 @@ func (s *HTTPServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	// ClickHouse down is not unready: writes go to Postgres and its outbox,
 	// and reads fall back to Postgres.
 	body := `{"status":"ready"}`
-	if s.service != nil && s.service.Analytics() != nil {
+	if s.service != nil && s.service.AnalyticsMissing() {
+		body = `{"status":"ready","clickhouse":"unavailable"}`
+	} else if s.service != nil && s.service.Analytics() != nil {
 		if err := s.service.Analytics().Ping(ctx); err != nil {
 			log.Warn().Err(err).Msg("clickhouse unavailable; serving reads from postgres")
 			body = `{"status":"ready","clickhouse":"unavailable"}`

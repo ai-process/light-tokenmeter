@@ -21,7 +21,17 @@ type AnalyticsReader interface {
 type UsageService struct {
 	repo *repository.Repository
 	// Set once ClickHouse is reachable, which may be after startup.
-	analytics atomic.Pointer[AnalyticsReader]
+	analytics       atomic.Pointer[AnalyticsReader]
+	analyticsWanted atomic.Bool
+}
+
+// ExpectAnalytics marks ClickHouse as configured, so readiness can report
+// it missing until WithAnalytics is called.
+func (s *UsageService) ExpectAnalytics() { s.analyticsWanted.Store(true) }
+
+// AnalyticsMissing reports ClickHouse configured but not connected yet.
+func (s *UsageService) AnalyticsMissing() bool {
+	return s.analyticsWanted.Load() && s.analytics.Load() == nil
 }
 
 // NewUsageService creates a new usage service

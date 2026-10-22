@@ -249,3 +249,23 @@ func TestLongOutageOnlyDelays(t *testing.T) {
 	s.drain(t, r)
 	s.requireInStep(t, totals{})
 }
+
+// A batch that keeps failing for reasons not about its rows is postponed
+// after holdMax, so the events behind it still flow.
+func TestStuckBatchIsPostponedAfterHoldMax(t *testing.T) {
+	s := newStack(t)
+	s.record(t, 3, "m")
+	stuck := &flakyConn{Conn: s.ch.Conn(), fails: 1 << 30}
+	r := NewReplicator(s.repo, stuck, 3, time.Millisecond)
+	r.retryMax, r.holdMax = time.Millisecond, 20*time.Millisecond
+	start := time.Now()
+	require.False(t, r.copyBatch())
+	require.Less(t, time.Since(start), 5*time.Second)
+
+	s.record(t, 3, "m")
+	ok := NewReplicator(s.repo, s.ch.Conn(), 3, time.Millisecond)
+	ok.retryMax = time.Millisecond
+	require.True(t, ok.copyBatch(), "the batch behind the postponed one is copied")
+	s.drain(t, ok)
+	s.requireInStep(t, totals{})
+}

@@ -23,6 +23,9 @@ const (
 	retryMax   = 15 * time.Second
 	ackTimeout = 10 * time.Second
 	refusedMax = 10 * time.Minute
+	// A batch failing longer than this is postponed, in case the failure is
+	// its own (too big for a slow link or a memory quota), not an outage.
+	holdMax = 5 * time.Minute
 )
 
 // Outbox is the Postgres side: events written there in the same statement as
@@ -44,6 +47,7 @@ type Replicator struct {
 	batchSize int
 	interval  time.Duration
 	retryMax  time.Duration // overridden only by tests
+	holdMax   time.Duration
 	ctx       context.Context
 	cancel    context.CancelFunc
 	done      chan struct{}
@@ -60,7 +64,7 @@ func NewReplicator(outbox Outbox, conn driver.Conn, batchSize int, interval time
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Replicator{outbox: outbox, conn: conn, id: uuid.New(), batchSize: batchSize, interval: interval,
-		retryMax: retryMax, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+		retryMax: retryMax, holdMax: holdMax, ctx: ctx, cancel: cancel, done: make(chan struct{})}
 }
 
 func (r *Replicator) Start() { go r.run() }
@@ -103,6 +107,7 @@ func (r *Replicator) copyBatch() bool {
 	}
 	log := log.With().Str("batch", batch.ID.String()).Logger()
 	backoff := min(r.interval, r.retryMax)
+	held := time.Now()
 	for warned := false; ; {
 		err := r.insert(r.ctx, batch.ID, events)
 		if err == nil {
@@ -114,6 +119,11 @@ func (r *Replicator) copyBatch() bool {
 		if refusesData(err) {
 			r.postpone(log, batch, len(events), err)
 			return false // pace refusals: a broken schema refuses every batch
+		}
+		if time.Since(held) > r.holdMax {
+			r.postpone(log, batch, len(events), err)
+			r.pause(r.retryMax) // an outage fails the next batch too; don't churn claims
+			return false
 		}
 		if !warned {
 			log.Warn().Err(err).Int("events", len(events)).Msg("clickhouse replicator: insert failed, holding the batch and retrying")
@@ -140,6 +150,13 @@ func (r *Replicator) copyBatch() bool {
 		return false
 	}
 	return true
+}
+
+func (r *Replicator) pause(d time.Duration) {
+	select {
+	case <-time.After(d):
+	case <-r.ctx.Done():
+	}
 }
 
 // dataErrorCodes are ClickHouse errors about the values being inserted. Any

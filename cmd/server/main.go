@@ -86,6 +86,7 @@ func main() {
 		// Events reach ClickHouse through the Postgres outbox, so none is lost
 		// to a full buffer, a ClickHouse outage or a restart.
 		repo.WithOutbox()
+		usageSvc.ExpectAnalytics()
 		ch = startClickHouse(ctx, cfg, repo, usageSvc)
 	}
 
