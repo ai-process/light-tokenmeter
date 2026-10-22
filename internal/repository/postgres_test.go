@@ -3,7 +3,9 @@ package repository
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,31 +18,50 @@ import (
 	"github.com/ai-process/light-tokenmeter/internal/domain"
 )
 
+// getTestPool gives each test a database of its own, created and dropped
+// around it: tests TRUNCATE, which must never reach a developer's real data.
+// With REQUIRE_DB set (CI), no Postgres is a failure instead of a skip.
 func getTestPool(t *testing.T) (*pgxpool.Pool, *Repository) {
+	t.Helper()
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgres://tokenmeter:tokenmeter@localhost:5433/tokenmeter?sslmode=disable"
 	}
+	skip := t.Skipf
+	if os.Getenv("REQUIRE_DB") != "" {
+		skip = t.Fatalf
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	poolCfg, err := pgxpool.ParseConfig(dbURL)
+	admin, err := pgxpool.New(ctx, dbURL)
+	if err == nil {
+		err = admin.Ping(ctx)
+	}
 	if err != nil {
-		t.Skipf("cannot parse database config: %v", err)
+		skip("cannot reach test postgres: %v", err)
+		return nil, nil
 	}
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
-	if err != nil {
-		t.Skipf("cannot connect to test postgres: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("cannot ping test postgres: %v", err)
-	}
+	t.Cleanup(admin.Close)
+	name := "tm_test_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	_, err = admin.Exec(ctx, "CREATE DATABASE "+name)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)"); err != nil {
+			t.Logf("drop test database %s: %v", name, err)
+		}
+	})
 
-	if err := database.RunMigrations(ctx, dbURL); err != nil {
+	u, err := url.Parse(dbURL)
+	require.NoError(t, err)
+	u.Path = "/" + name
+	if err := database.RunMigrations(ctx, u.String()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
-
+	pool, err := pgxpool.New(ctx, u.String())
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
 	return pool, New(pool)
 }
 

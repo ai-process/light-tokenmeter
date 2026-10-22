@@ -3,6 +3,7 @@ package clickhouse
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,28 +21,34 @@ func envOr(key, def string) string {
 	return def
 }
 
+// getTestClient gives each test a database of its own. With REQUIRE_DB set
+// (CI), no ClickHouse is a failure instead of a skip.
 func getTestClient(t *testing.T) *Client {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	name := "tokenmeter_test_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
 	client, err := Connect(ctx, Config{
 		Addr:     envOr("CLICKHOUSE_TEST_ADDR", "localhost:9000"),
-		Database: "tokenmeter_test",
+		Database: name,
 		User:     envOr("CLICKHOUSE_TEST_USER", "tokenmeter"),
 		Password: envOr("CLICKHOUSE_TEST_PASSWORD", "tokenmeter"),
 	})
 	if err != nil {
+		if os.Getenv("REQUIRE_DB") != "" {
+			t.Fatalf("cannot connect to test clickhouse: %v", err)
+		}
 		t.Skipf("cannot connect to test clickhouse: %v", err)
 	}
 	t.Cleanup(func() {
+		if err := client.conn.Exec(context.Background(), "DROP DATABASE IF EXISTS `"+name+"`"); err != nil {
+			t.Logf("drop test database %s: %v", name, err)
+		}
 		if err := client.Close(); err != nil {
 			t.Errorf("close clickhouse: %v", err)
 		}
 	})
-
-	// Start from scratch so every migration, including ALTERs, is exercised.
-	require.NoError(t, client.conn.Exec(ctx, "DROP TABLE IF EXISTS usage_events"))
-	require.NoError(t, client.conn.Exec(ctx, "DROP TABLE IF EXISTS schema_migrations"))
 	require.NoError(t, client.EnsureSchema(ctx))
 	return client
 }
