@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/rs/zerolog/log"
 
@@ -18,8 +19,9 @@ type AnalyticsReader interface {
 
 // UsageService handles business logic for usage events
 type UsageService struct {
-	repo      *repository.Repository
-	analytics AnalyticsReader
+	repo *repository.Repository
+	// Set once ClickHouse is reachable, which may be after startup.
+	analytics atomic.Pointer[AnalyticsReader]
 }
 
 // NewUsageService creates a new usage service
@@ -29,13 +31,16 @@ func NewUsageService(repo *repository.Repository) *UsageService {
 
 // WithAnalytics configures an analytical engine (e.g., ClickHouse).
 func (s *UsageService) WithAnalytics(r AnalyticsReader) *UsageService {
-	s.analytics = r
+	s.analytics.Store(&r)
 	return s
 }
 
 // Analytics returns the configured AnalyticsReader, if any.
 func (s *UsageService) Analytics() AnalyticsReader {
-	return s.analytics
+	if r := s.analytics.Load(); r != nil {
+		return *r
+	}
+	return nil
 }
 
 // RecordEvent records a single usage event
@@ -81,8 +86,12 @@ func (s *UsageService) RecordEvents(ctx context.Context, events []*domain.UsageE
 
 // GetSummary returns aggregated usage statistics
 func (s *UsageService) GetSummary(ctx context.Context, params domain.SummaryParams) ([]domain.SummaryRow, bool, error) {
-	if s.analytics != nil {
-		return s.analytics.QuerySummary(ctx, params)
+	if a := s.Analytics(); a != nil {
+		rows, truncated, err := a.QuerySummary(ctx, params)
+		if err == nil || ctx.Err() != nil {
+			return rows, truncated, err
+		}
+		log.Warn().Err(err).Msg("clickhouse summary failed; answering from postgres")
 	}
 
 	rows, truncated, err := s.repo.QuerySummary(ctx, params)
@@ -103,8 +112,12 @@ func (s *UsageService) GetSummary(ctx context.Context, params domain.SummaryPara
 // GetUsageByMeta returns usage aggregated over events carrying a meta
 // key/value, split by an optional second meta key plus vendor and model.
 func (s *UsageService) GetUsageByMeta(ctx context.Context, params domain.MetaUsageParams) ([]domain.MetaUsageRow, bool, error) {
-	if s.analytics != nil {
-		return s.analytics.QueryUsageByMeta(ctx, params)
+	if a := s.Analytics(); a != nil {
+		rows, truncated, err := a.QueryUsageByMeta(ctx, params)
+		if err == nil || ctx.Err() != nil {
+			return rows, truncated, err
+		}
+		log.Warn().Err(err).Msg("clickhouse usage-by-meta failed; answering from postgres")
 	}
 
 	rows, truncated, err := s.repo.QueryUsageByMeta(ctx, params)

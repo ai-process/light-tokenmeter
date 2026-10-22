@@ -25,6 +25,7 @@ type flakyConn struct {
 	mu           sync.Mutex
 	fails        int
 	poisonServer bool // refuse on Send with a data error, not on Append
+	healed       bool // poison is accepted like any row
 }
 
 func (c *flakyConn) PrepareBatch(ctx context.Context, query string, opts ...driver.PrepareBatchOption) (driver.Batch, error) {
@@ -41,7 +42,18 @@ func (c *flakyConn) PrepareBatch(ctx context.Context, query string, opts ...driv
 	if err != nil {
 		return nil, err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.healed {
+		return b, nil
+	}
 	return &poisonBatch{Batch: b, server: c.poisonServer}, nil
+}
+
+func (c *flakyConn) heal() {
+	c.mu.Lock()
+	c.healed = true
+	c.mu.Unlock()
 }
 
 type poisonBatch struct {
@@ -156,7 +168,7 @@ func TestReplicatorKeepsClickHouseInStepWithPostgres(t *testing.T) {
 	down := NewReplicator(s.repo, &flakyConn{Conn: s.ch.Conn(), fails: 3}, 200, 5*time.Millisecond)
 	require.True(t, down.copyBatch(), "a full batch, once ClickHouse is back")
 
-	batch, events, err := s.repo.ClaimOutbox(ctx, 200, time.Hour)
+	batch, events, err := s.repo.ClaimOutbox(ctx, uuid.New(), 200, time.Hour)
 	require.NoError(t, err)
 	require.NoError(t, down.insert(ctx, batch.ID, events))
 	// The process dies here, before AckOutbox; its lease runs out.
@@ -237,5 +249,42 @@ func TestOutageNeverSetsEventsAside(t *testing.T) {
 	_, _, setAside, err := s.repo.OutboxBacklog(context.Background())
 	require.NoError(t, err)
 	require.Zero(t, setAside)
+	s.requireInStep(t, totals{})
+}
+
+// The schema insert expects must be what EnsureSchema builds, or every
+// refusal would be blamed on the schema and nothing ever set aside.
+func TestInsertedColumnsMatchSchema(t *testing.T) {
+	s := newStack(t)
+	r := NewReplicator(s.repo, s.ch.Conn(), 10, time.Millisecond)
+	mismatch, err := r.schemaMismatch()
+	require.NoError(t, err)
+	require.Empty(t, mismatch)
+}
+
+// With the schema changed under it, a ClickHouse refusing every row is not
+// the rows' fault: they wait, none is set aside, and all flow once it is fixed.
+func TestChangedSchemaNeverSetsEventsAside(t *testing.T) {
+	s := newStack(t)
+	ctx := context.Background()
+	require.NoError(t, s.ch.Conn().Exec(ctx, "ALTER TABLE usage_events MODIFY COLUMN error_class String"))
+	s.record(t, 6, "poison") // refused by the server, as a broken schema would
+
+	conn := &flakyConn{Conn: s.ch.Conn(), poisonServer: true}
+	r := NewReplicator(s.repo, conn, 2, time.Millisecond)
+	r.retryMax = time.Millisecond
+	for i := 0; i < 50; i++ {
+		for r.copyBatch() {
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	waiting, _, setAside, err := s.repo.OutboxBacklog(ctx)
+	require.NoError(t, err)
+	require.Zero(t, setAside, "a schema problem must not set events aside")
+	require.EqualValues(t, 6, waiting)
+
+	require.NoError(t, s.ch.Conn().Exec(ctx, "ALTER TABLE usage_events MODIFY COLUMN error_class LowCardinality(String)"))
+	conn.heal()
+	s.drain(t, r)
 	s.requireInStep(t, totals{})
 }

@@ -331,14 +331,20 @@ Postgres is always the record. With `CLICKHOUSE_ENABLED=true`:
   waiting events and inserts them into ClickHouse, then removes them from the outbox. Replicas
   take different batches.
 - **Reads**: `/v1/usage/summary`, `GetUsageSummary` and `GetUsageByMeta` are answered from
-  ClickHouse, so they trail writes by about one flush interval.
+  ClickHouse, so they trail writes by about one flush interval. If ClickHouse fails a query, or
+  is not reachable yet, the answer comes from Postgres.
+- **Startup and readiness**: the service starts and is ready without ClickHouse; it connects in
+  the background and `/readyz` reports `"clickhouse":"unavailable"` meanwhile, without failing.
 - **ClickHouse unreachable** (or failing for reasons not about the rows): the replica keeps its
   batch, renews its two-minute lease, and retries with backoff up to 15 s apart. Nothing is
   dropped or set aside, and writes keep working; the outbox drains once ClickHouse is back.
 - **ClickHouse refusing rows** (a data error such as a type mismatch): the batch is retried 30 s and
   60 s later while the events behind it flow, then halved, and halved again, until the one event
   at fault is **set aside**: it stays in `clickhouse_outbox` with `failed_at` and the error in
-  `failure`, and in Postgres reports. To retry set-aside events after fixing the cause:
+  `failure`, and is missing from reports served by ClickHouse. This happens only while
+  ClickHouse's `usage_events` has the expected columns (or took other inserts in the last five
+  minutes); after a schema change the batches just wait and an error names the column that
+  differs. To retry set-aside events after fixing the cause:
   `UPDATE clickhouse_outbox SET failed_at = NULL, failure = NULL WHERE failed_at IS NOT NULL`.
 - **Restart or crash**: waiting events stay in the outbox. A batch inserted but not yet removed
   is taken over when its lease ends and inserted again under the same deduplication token;

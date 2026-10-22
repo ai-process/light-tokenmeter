@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS clickhouse_outbox (
     batch_id UUID,
     -- A claimed batch may be taken over once its lease ends.
     lease_until TIMESTAMPTZ,
+    lease_owner UUID,
     -- ClickHouse refusals of this batch, which space its retries out.
     attempts INT NOT NULL DEFAULT 0,
     -- Set aside: ClickHouse refuses this event on its own; kept for inspection.

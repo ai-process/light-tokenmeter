@@ -34,6 +34,8 @@ func fill(t *testing.T, repo *Repository, n int) []*domain.UsageEvent {
 	return events
 }
 
+var owner = uuid.New()
+
 func expire(t *testing.T, repo *Repository, batch uuid.UUID) {
 	t.Helper()
 	_, err := repo.pool.Exec(context.Background(),
@@ -61,14 +63,14 @@ func TestOutboxClaimAckAndTakeOver(t *testing.T) {
 	require.EqualValues(t, 5, waiting)
 
 	// Claims never hand out an event twice.
-	b1, ev1, err := repo.ClaimOutbox(ctx, 3, time.Minute)
+	b1, ev1, err := repo.ClaimOutbox(ctx, owner, 3, time.Minute)
 	require.NoError(t, err)
-	b2, ev2, err := repo.ClaimOutbox(ctx, 3, time.Minute)
+	b2, ev2, err := repo.ClaimOutbox(ctx, owner, 3, time.Minute)
 	require.NoError(t, err)
 	require.NotEqual(t, b1.ID, b2.ID)
 	require.Len(t, ev1, 3)
 	require.Len(t, ev2, 2)
-	b3, _, err := repo.ClaimOutbox(ctx, 3, time.Minute)
+	b3, _, err := repo.ClaimOutbox(ctx, owner, 3, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, uuid.Nil, b3.ID, "nothing left to claim")
 
@@ -93,21 +95,24 @@ func TestOutboxClaimAckAndTakeOver(t *testing.T) {
 	// b2's replica died: once its lease ends it is handed out again under the
 	// same ID, which ClickHouse uses to drop the repeat.
 	expire(t, repo, b2.ID)
-	again, evAgain, err := repo.ClaimOutbox(ctx, 3, time.Minute)
+	again, evAgain, err := repo.ClaimOutbox(ctx, owner, 3, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, b2.ID, again.ID)
 	require.ElementsMatch(t, ids(ev2), ids(evAgain))
 
-	// A renewed lease keeps it from being taken over.
-	ok, err := repo.RenewOutbox(ctx, b2.ID, time.Minute)
+	// A renewed lease keeps it from being taken over, and only its owner may renew it.
+	ok, err := repo.RenewOutbox(ctx, owner, b2.ID, time.Minute)
 	require.NoError(t, err)
 	require.True(t, ok)
-	b4, _, err := repo.ClaimOutbox(ctx, 3, time.Minute)
+	ok, err = repo.RenewOutbox(ctx, uuid.New(), b2.ID, time.Minute)
+	require.NoError(t, err)
+	require.False(t, ok, "a replica whose batch was taken over must let it go")
+	b4, _, err := repo.ClaimOutbox(ctx, owner, 3, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, uuid.Nil, b4.ID)
 
 	require.NoError(t, repo.AckOutbox(ctx, b2.ID))
-	ok, err = repo.RenewOutbox(ctx, b2.ID, time.Minute)
+	ok, err = repo.RenewOutbox(ctx, owner, b2.ID, time.Minute)
 	require.NoError(t, err)
 	require.False(t, ok, "an acknowledged batch cannot be renewed")
 	waiting, _ = backlog(t, repo)
@@ -120,7 +125,7 @@ func TestOutboxTakeOverHasOneWinner(t *testing.T) {
 	repo.WithOutbox()
 	ctx := context.Background()
 	fill(t, repo, 5)
-	b, _, err := repo.ClaimOutbox(ctx, 5, time.Minute)
+	b, _, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
 	require.NoError(t, err)
 
 	for round := 0; round < 10; round++ {
@@ -133,7 +138,7 @@ func TestOutboxTakeOverHasOneWinner(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				c, _, err := repo.ClaimOutbox(ctx, 5, time.Minute)
+				c, _, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
 				assert.NoError(t, err)
 				got[i] = c.ID
 			}()
@@ -156,31 +161,31 @@ func TestOutboxRefusalsPostponeSplitAndSetAside(t *testing.T) {
 	ctx := context.Background()
 	fill(t, repo, 5)
 
-	b, _, err := repo.ClaimOutbox(ctx, 5, time.Minute)
+	b, _, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
 	require.NoError(t, err)
 	require.Zero(t, b.Attempts)
 
 	// Postponed: not claimable until the delay passes, then back with a count.
 	require.NoError(t, repo.RetryOutboxLater(ctx, b.ID, time.Hour))
-	none, _, err := repo.ClaimOutbox(ctx, 5, time.Minute)
+	none, _, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, uuid.Nil, none.ID)
 	expire(t, repo, b.ID)
-	again, _, err := repo.ClaimOutbox(ctx, 5, time.Minute)
+	again, _, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, b.ID, again.ID)
 	require.Equal(t, 1, again.Attempts)
 
 	// Split: two fresh batches covering the same events, claimable at once.
-	require.NoError(t, repo.SplitOutbox(ctx, b.ID))
-	h1, e1, err := repo.ClaimOutbox(ctx, 5, time.Minute)
+	require.NoError(t, repo.SplitOutbox(ctx, b.ID, 2))
+	h1, e1, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
 	require.NoError(t, err)
-	h2, e2, err := repo.ClaimOutbox(ctx, 5, time.Minute)
+	h2, e2, err := repo.ClaimOutbox(ctx, owner, 5, time.Minute)
 	require.NoError(t, err)
 	require.NotEqual(t, b.ID, h1.ID)
 	require.NotEqual(t, b.ID, h2.ID)
 	require.NotEqual(t, h1.ID, h2.ID)
-	require.Zero(t, h1.Attempts)
+	require.Equal(t, 2, h1.Attempts, "halves keep the count, so they split again at the next refusal")
 	require.Len(t, append(e1, e2...), 5)
 	require.ElementsMatch(t, []int{2, 3}, []int{len(e1), len(e2)})
 
