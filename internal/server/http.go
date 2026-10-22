@@ -9,6 +9,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/ai-process/light-tokenmeter/internal/auth"
 	"github.com/ai-process/light-tokenmeter/internal/domain"
 	"github.com/ai-process/light-tokenmeter/internal/repository"
 	"github.com/ai-process/light-tokenmeter/internal/service"
@@ -24,11 +25,12 @@ type HTTPServer struct {
 
 // NewHTTPServer creates a new HTTP server
 func NewHTTPServer(repo *repository.Repository, addr string) *HTTPServer {
-	return NewHTTPServerWithService(service.NewUsageService(repo), repo, addr)
+	return NewHTTPServerWithService(service.NewUsageService(repo), repo, addr, nil)
 }
 
-// NewHTTPServerWithService creates a new HTTP server with an existing usage service.
-func NewHTTPServerWithService(usageService *service.UsageService, repo *repository.Repository, addr string) *HTTPServer {
+// NewHTTPServerWithService creates a new HTTP server with an existing usage
+// service. A nil or empty verifier serves without authentication.
+func NewHTTPServerWithService(usageService *service.UsageService, repo *repository.Repository, addr string, verifier *auth.Verifier) *HTTPServer {
 	s := &HTTPServer{
 		service: usageService,
 		repo:    repo,
@@ -42,9 +44,14 @@ func NewHTTPServerWithService(usageService *service.UsageService, repo *reposito
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 
 	// Usage API endpoints
-	mux.HandleFunc("POST /v1/usage/events", s.handleRecordEvent)
-	mux.HandleFunc("POST /v1/usage/events:batch", s.handleRecordEvents)
-	mux.HandleFunc("GET /v1/usage/summary", s.handleGetSummary)
+	require := func(scope auth.Scope, h http.HandlerFunc) http.Handler {
+		return auth.Require(verifier, scope, func(w http.ResponseWriter, status int, code, message string) {
+			writeError(w, status, code, message, "")
+		}, h)
+	}
+	mux.Handle("POST /v1/usage/events", require(auth.Write, s.handleRecordEvent))
+	mux.Handle("POST /v1/usage/events:batch", require(auth.Write, s.handleRecordEvents))
+	mux.Handle("GET /v1/usage/summary", require(auth.Read, s.handleGetSummary))
 
 	s.server = &http.Server{
 		Addr:         addr,

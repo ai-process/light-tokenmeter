@@ -2,7 +2,11 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +16,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/reflection/grpc_reflection_v1"
+	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/ai-process/light-tokenmeter/internal/auth"
 
 	pb "github.com/ai-process/light-tokenmeter/gen/usage/v1"
 )
@@ -131,4 +144,91 @@ func TestProtoToEvent_Cost(t *testing.T) {
 		CostNanousd: -1,
 	})
 	assert.ErrorContains(t, err, "cost_nanousd must not be negative")
+}
+
+func testVerifier(t *testing.T) *auth.Verifier {
+	t.Helper()
+	sum := func(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
+	v, err := auth.Parse("ktms:write:" + sum("w-token") + ",console:read:" + sum("r-token"))
+	require.NoError(t, err)
+	return v
+}
+
+func TestHTTPServer_Auth(t *testing.T) {
+	h := NewHTTPServerWithService(nil, nil, ":0", testVerifier(t)).server.Handler
+	do := func(method, path, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewReader([]byte("{")))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+
+	assert.Equal(t, http.StatusOK, do(http.MethodGet, "/healthz", "").Code)
+	for _, path := range []string{"/v1/usage/events", "/v1/usage/events:batch"} {
+		w := do(http.MethodPost, path, "")
+		assert.Equal(t, http.StatusUnauthorized, w.Code, path)
+		assert.Contains(t, w.Body.String(), `"code":"unauthenticated"`, path)
+		assert.Equal(t, http.StatusForbidden, do(http.MethodPost, path, "r-token").Code, path)
+		// The malformed body proves the request got past auth.
+		assert.Equal(t, http.StatusBadRequest, do(http.MethodPost, path, "w-token").Code, path)
+	}
+	assert.Equal(t, http.StatusUnauthorized, do(http.MethodGet, "/v1/usage/summary", "").Code)
+	assert.Equal(t, http.StatusForbidden, do(http.MethodGet, "/v1/usage/summary", "w-token").Code)
+	assert.Equal(t, http.StatusBadRequest, do(http.MethodGet, "/v1/usage/summary", "r-token").Code)
+}
+
+func TestGRPCServer_Auth(t *testing.T) {
+	lis := bufconn.Listen(1 << 20)
+	srv := NewGRPCServerWithService(nil, "", testVerifier(t))
+	go func() { _ = srv.server.Serve(lis) }()
+	t.Cleanup(srv.server.Stop)
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	client := pb.NewUsageServiceClient(conn)
+
+	withToken := func(token string) context.Context {
+		return metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+token)
+	}
+	code := func(err error) codes.Code { return status.Code(err) }
+
+	// Empty requests fail validation, which only runs once auth passes.
+	_, err = client.RecordUsageEvents(context.Background(), &pb.RecordUsageEventsRequest{})
+	assert.Equal(t, codes.Unauthenticated, code(err))
+	_, err = client.RecordUsageEvents(withToken("r-token"), &pb.RecordUsageEventsRequest{})
+	assert.Equal(t, codes.PermissionDenied, code(err))
+	_, err = client.RecordUsageEvents(withToken("w-token"), &pb.RecordUsageEventsRequest{})
+	assert.Equal(t, codes.InvalidArgument, code(err))
+	_, err = client.RecordUsageEvent(withToken("w-token"), &pb.RecordUsageEventRequest{})
+	assert.Equal(t, codes.InvalidArgument, code(err))
+
+	_, err = client.GetUsageSummary(withToken("w-token"), &pb.GetUsageSummaryRequest{})
+	assert.Equal(t, codes.PermissionDenied, code(err))
+	_, err = client.GetUsageSummary(withToken("r-token"), &pb.GetUsageSummaryRequest{})
+	assert.Equal(t, codes.InvalidArgument, code(err))
+	_, err = client.GetUsageByMeta(withToken("r-token"), &pb.GetUsageByMetaRequest{})
+	assert.Equal(t, codes.InvalidArgument, code(err))
+
+	refl := grpc_reflection_v1.NewServerReflectionClient(conn)
+	stream, err := refl.ServerReflectionInfo(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&grpc_reflection_v1.ServerReflectionRequest{
+		MessageRequest: &grpc_reflection_v1.ServerReflectionRequest_ListServices{},
+	}))
+	_, err = stream.Recv()
+	assert.NoError(t, err, "reflection must stay open")
+}
+
+func TestGRPCScopesCoverEveryRPC(t *testing.T) {
+	for _, m := range pb.UsageService_ServiceDesc.Methods {
+		full := "/" + pb.UsageService_ServiceDesc.ServiceName + "/" + m.MethodName
+		_, ok := grpcScopes[full]
+		assert.True(t, ok, "%s has no scope", full)
+	}
 }

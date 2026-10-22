@@ -13,6 +13,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog/log"
 
+	"github.com/ai-process/light-tokenmeter/internal/auth"
 	"github.com/ai-process/light-tokenmeter/internal/config"
 	"github.com/ai-process/light-tokenmeter/internal/database"
 	"github.com/ai-process/light-tokenmeter/internal/logger"
@@ -39,6 +40,14 @@ func main() {
 		Str("http_addr", cfg.HTTPAddr).
 		Str("log_level", cfg.LogLevel).
 		Msg("starting light-tokenmeter service")
+
+	verifier, err := auth.Load(cfg.Tokens, cfg.TokensFile)
+	if err != nil {
+		log.Fatal().Err(err).Msg("invalid TOKENMETER_TOKENS")
+	}
+	if !verifier.Enabled() {
+		log.Warn().Msg("TOKENMETER_TOKENS is empty: authentication is off and anyone who reaches the ports can write and read usage")
+	}
 
 	// Create root context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -101,8 +110,8 @@ func main() {
 	}
 
 	// Create servers
-	grpcServer := server.NewGRPCServerWithService(usageSvc, cfg.GRPCAddr)
-	httpServer := server.NewHTTPServerWithService(usageSvc, repo, cfg.HTTPAddr)
+	grpcServer := server.NewGRPCServerWithService(usageSvc, cfg.GRPCAddr, verifier)
+	httpServer := server.NewHTTPServerWithService(usageSvc, repo, cfg.HTTPAddr, verifier)
 
 	// Start gRPC server in goroutine
 	grpcErrCh := make(chan error, 1)
