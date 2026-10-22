@@ -3,9 +3,6 @@ package repository
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,64 +11,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ai-process/light-tokenmeter/internal/database"
 	"github.com/ai-process/light-tokenmeter/internal/domain"
+	"github.com/ai-process/light-tokenmeter/internal/testdb"
 )
 
-// getTestPool gives each test a database of its own, created and dropped
-// around it: tests TRUNCATE, which must never reach a developer's real data.
-// With REQUIRE_DB set (CI), no Postgres is a failure instead of a skip.
 func getTestPool(t *testing.T) (*pgxpool.Pool, *Repository) {
 	t.Helper()
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://tokenmeter:tokenmeter@localhost:5433/tokenmeter?sslmode=disable"
-	}
-	skip := t.Skipf
-	if os.Getenv("REQUIRE_DB") != "" {
-		skip = t.Fatalf
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	admin, err := pgxpool.New(ctx, dbURL)
-	if err == nil {
-		err = admin.Ping(ctx)
-	}
-	if err != nil {
-		skip("cannot reach test postgres: %v", err)
-		return nil, nil
-	}
-	t.Cleanup(admin.Close)
-	name := "tm_test_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
-	_, err = admin.Exec(ctx, "CREATE DATABASE "+name)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)"); err != nil {
-			t.Logf("drop test database %s: %v", name, err)
-		}
-	})
-
-	u, err := url.Parse(dbURL)
-	require.NoError(t, err)
-	u.Path = "/" + name
-	if err := database.RunMigrations(ctx, u.String()); err != nil {
-		t.Fatalf("failed to run migrations: %v", err)
-	}
-	pool, err := pgxpool.New(ctx, u.String())
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	pool := testdb.Postgres(t)
 	return pool, New(pool)
 }
 
 func TestExplainJobIdIndex(t *testing.T) {
 	pool, repo := getTestPool(t)
 	ctx := context.Background()
-
-	// Clear table and insert test data
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
+	var err error
 
 	events := make([]*domain.UsageEvent, 0, 500)
 	for i := 0; i < 500; i++ {
@@ -119,11 +72,9 @@ func TestExplainJobIdIndex(t *testing.T) {
 }
 
 func TestQuerySummary_OccurredAt(t *testing.T) {
-	pool, repo := getTestPool(t)
+	_, repo := getTestPool(t)
 	ctx := context.Background()
-
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
+	var err error
 
 	now := time.Now().UTC()
 	occurred3DaysAgo := now.Add(-72 * time.Hour)
@@ -168,9 +119,7 @@ func TestQuerySummary_OccurredAt(t *testing.T) {
 func TestQuerySummary_TruncatedFlag(t *testing.T) {
 	pool, repo := getTestPool(t)
 	ctx := context.Background()
-
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
+	var err error
 
 	now := time.Now().UTC()
 
@@ -212,9 +161,7 @@ func TestQuerySummary_TruncatedFlag(t *testing.T) {
 func TestQueryUsageByMeta_TruncatedFlag(t *testing.T) {
 	pool, repo := getTestPool(t)
 	ctx := context.Background()
-
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
+	var err error
 
 	// Insert 10005 events with same job_id but different group_by_meta_key values
 	insertSQL := `
@@ -250,11 +197,9 @@ func TestQueryUsageByMeta_TruncatedFlag(t *testing.T) {
 }
 
 func TestCostAggregation(t *testing.T) {
-	pool, repo := getTestPool(t)
+	_, repo := getTestPool(t)
 	ctx := context.Background()
-
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
+	var err error
 
 	newEvent := func(model string, cost int64) *domain.UsageEvent {
 		return &domain.UsageEvent{
@@ -307,10 +252,8 @@ func TestCostAggregation(t *testing.T) {
 // A retried batch inserts nothing new, and InsertBatch says so by ID, so the
 // caller can keep duplicates out of downstream sinks.
 func TestInsertBatchReturnsOnlyNewIDs(t *testing.T) {
-	pool, repo := getTestPool(t)
+	_, repo := getTestPool(t)
 	ctx := context.Background()
-	_, err := pool.Exec(ctx, "TRUNCATE usage_events;")
-	require.NoError(t, err)
 
 	now := time.Now()
 	mk := func() *domain.UsageEvent {

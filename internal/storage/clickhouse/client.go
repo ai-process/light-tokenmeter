@@ -40,8 +40,13 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 	}
 	initConn, err := clickhouse.Open(initOpts)
 	if err == nil {
+		// Reachable but unable to create it (no grant): say so, rather than
+		// fail later with a puzzling "database does not exist".
 		if pingErr := initConn.Ping(ctx); pingErr == nil {
-			_ = initConn.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", cfg.Database))
+			if err := initConn.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", cfg.Database)); err != nil {
+				_ = initConn.Close()
+				return nil, fmt.Errorf("create clickhouse database %s: %w", cfg.Database, err)
+			}
 		}
 		_ = initConn.Close()
 	}

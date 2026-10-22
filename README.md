@@ -279,13 +279,14 @@ docker compose up --build
 ```
 
 The storage tests need Postgres on `localhost:5433` (or `DATABASE_URL`) and ClickHouse on
-`localhost:9000` (or `CLICKHOUSE_TEST_ADDR`), and skip without them; each test creates and drops a
-database of its own. CI runs them with `REQUIRE_DB=1`, which turns a missing database into a
+`localhost:9000` (or `CLICKHOUSE_TEST_ADDR`), and skip without them. Each test creates and drops a
+database of its own (the Postgres role needs `CREATEDB`), so tests never touch other data; databases
+left by an interrupted run are dropped by the next run after an hour. CI runs them with `REQUIRE_DB=1`, which turns a missing database into a
 failure:
 
 ```bash
 docker run -d --rm -p 5433:5432 -e POSTGRES_USER=tokenmeter -e POSTGRES_PASSWORD=tokenmeter postgres:17-alpine
-docker run -d --rm -p 9000:9000 -e CLICKHOUSE_USER=tokenmeter -e CLICKHOUSE_PASSWORD=tokenmeter clickhouse/clickhouse-server:24.3-alpine
+docker run -d --rm -p 9000:9000 -e CLICKHOUSE_USER=tokenmeter -e CLICKHOUSE_PASSWORD=tokenmeter -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 clickhouse/clickhouse-server:24.3-alpine
 REQUIRE_DB=1 make test
 ```
 
