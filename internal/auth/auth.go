@@ -124,15 +124,9 @@ func (v *Verifier) Enabled() bool { return v != nil && len(v.byHash) > 0 }
 
 // Check returns the token's name when bearer may act with scope.
 func (v *Verifier) Check(bearer string, scope Scope) (string, error) {
-	if !v.Enabled() {
-		return "", nil
-	}
-	if bearer == "" {
-		return "", ErrUnauthenticated
-	}
-	t, ok := v.byHash[sha256.Sum256([]byte(bearer))]
-	if !ok {
-		return "", ErrUnauthenticated
+	t, err := v.lookup(bearer)
+	if err != nil || t == nil {
+		return "", err
 	}
 	if !t.scopes[scope] {
 		return t.name, ErrForbidden
@@ -142,14 +136,23 @@ func (v *Verifier) Check(bearer string, scope Scope) (string, error) {
 
 // Known returns the token's name when bearer is any configured token.
 func (v *Verifier) Known(bearer string) (string, error) {
+	t, err := v.lookup(bearer)
+	if err != nil || t == nil {
+		return "", err
+	}
+	return t.name, nil
+}
+
+// lookup returns nil, nil when auth is off.
+func (v *Verifier) lookup(bearer string) (*token, error) {
 	if !v.Enabled() {
-		return "", nil
+		return nil, nil
 	}
 	t, ok := v.byHash[sha256.Sum256([]byte(bearer))]
 	if bearer == "" || !ok {
-		return "", ErrUnauthenticated
+		return nil, ErrUnauthenticated
 	}
-	return t.name, nil
+	return &t, nil
 }
 
 func bearer(header string) string {
