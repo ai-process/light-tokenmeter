@@ -223,9 +223,10 @@ func TestGRPCServer_Auth(t *testing.T) {
 	listServices := func(ctx context.Context) error {
 		stream, err := grpc_reflection_v1.NewServerReflectionClient(conn).ServerReflectionInfo(ctx)
 		require.NoError(t, err)
-		require.NoError(t, stream.Send(&grpc_reflection_v1.ServerReflectionRequest{
+		// A refused stream may fail Send with io.EOF; Recv carries the real status.
+		_ = stream.Send(&grpc_reflection_v1.ServerReflectionRequest{
 			MessageRequest: &grpc_reflection_v1.ServerReflectionRequest_ListServices{},
-		}))
+		})
 		_, err = stream.Recv()
 		return err
 	}
