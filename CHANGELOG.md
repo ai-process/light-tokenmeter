@@ -8,6 +8,12 @@ All notable changes to light-tokenmeter are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-23
+
+The first stable release, together with Keystone. The Model Switchboard. (KTMS) 1.0 and
+ktms-admin 1.0. From here on, what [API stability](README.md#api-stability) lists changes
+incompatibly only in a new major version. Upgrade from 0.1.x in one step.
+
 ### Added
 - `cache_read_tokens` and `cache_write_tokens` on usage events (`usage.v1` fields 17 and 18) and
   summed in summary and by-meta rows: the input tokens read from and written to the vendor's
@@ -45,6 +51,7 @@ All notable changes to light-tokenmeter are listed here. The format follows
 - Relicensed under Apache 2.0.
 
 ### Security
+- The startup log no longer contains the Postgres password: it named the whole `DATABASE_URL`.
 - clickhouse-go v2.49.0 with ch-go v0.74.0, fixing GO-2025-3603 in the ClickHouse protocol reader.
 
 ## [0.1.2] - 2026-10-21
@@ -72,7 +79,8 @@ All notable changes to light-tokenmeter are listed here. The format follows
 First release: append-only, idempotent usage events over HTTP and gRPC, daily summaries with
 filters and groupings, and usage by meta.
 
-[Unreleased]: https://github.com/ai-process/light-tokenmeter/compare/0.1.2...HEAD
+[Unreleased]: https://github.com/ai-process/light-tokenmeter/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ai-process/light-tokenmeter/compare/0.1.2...v1.0.0
 [0.1.2]: https://github.com/ai-process/light-tokenmeter/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/ai-process/light-tokenmeter/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/ai-process/light-tokenmeter/releases/tag/0.1.0
