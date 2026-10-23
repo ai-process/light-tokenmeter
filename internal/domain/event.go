@@ -155,7 +155,10 @@ func (e *UsageEvent) Validate() error {
 	if e.CostNanoUSD < 0 {
 		return ErrNegativeCost
 	}
-	if e.CacheReadTokens < 0 || e.CacheWriteTokens < 0 || e.CacheReadTokens > e.TokensInput-e.CacheWriteTokens {
+	// Checked only when sent, so events without them validate as before; the
+	// subtraction cannot overflow once 0 <= read <= input.
+	if (e.CacheReadTokens != 0 || e.CacheWriteTokens != 0) && (e.CacheReadTokens < 0 || e.CacheWriteTokens < 0 ||
+		e.CacheReadTokens > e.TokensInput || e.CacheWriteTokens > e.TokensInput-e.CacheReadTokens) {
 		return ErrCacheTokens
 	}
 	if len(e.ErrorClass) > MaxStringLength {

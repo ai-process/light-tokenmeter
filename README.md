@@ -142,7 +142,7 @@ An event describes one model call:
 | `vendor_http_status` | int | no | HTTP status returned by the vendor. |
 | `meta` | map of string | no | Your own tags, e.g. `{"job_id": "…"}`: non-empty keys, at most 16 KiB of keys and values per event. |
 | `cost_nanousd` | int ≥0 | no | Call cost in nano-USD (1e-9 USD), priced by the caller; stored as-is and never recomputed. |
-| `cache_read_tokens`, `cache_write_tokens` | int ≥0 | no | Input tokens read from and written to the vendor's prompt cache. They are part of `tokens_input`, not added to it, so together they must not exceed it. |
+| `cache_read_tokens`, `cache_write_tokens` | int ≥0 | no | Input tokens read from and written to the vendor's prompt cache. They are part of `tokens_input`, not added to it, so together they must not exceed it; an event that breaks this is refused. Anthropic reports them outside its `input_tokens`: send the sum of all three as `tokens_input`. |
 
 Batches (`POST /v1/usage/events:batch`, or `RecordUsageEvents` over gRPC) take up to 500
 events and report how many were created and how many were duplicates:
