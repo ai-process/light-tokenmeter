@@ -142,6 +142,7 @@ An event describes one model call:
 | `vendor_http_status` | int | no | HTTP status returned by the vendor. |
 | `meta` | map of string | no | Your own tags, e.g. `{"job_id": "…"}`: non-empty keys, at most 16 KiB of keys and values per event. |
 | `cost_nanousd` | int ≥0 | no | Call cost in nano-USD (1e-9 USD), priced by the caller; stored as-is and never recomputed. |
+| `cache_read_tokens`, `cache_write_tokens` | int ≥0 | no | Input tokens read from and written to the vendor's prompt cache. They are part of `tokens_input`, not added to it, so together they must not exceed it. |
 
 Batches (`POST /v1/usage/events:batch`, or `RecordUsageEvents` over gRPC) take up to 500
 events and report how many were created and how many were duplicates:
@@ -183,7 +184,8 @@ curl -s "localhost:8080/v1/usage/summary?$Q&model=gpt-4o&group_by_user_id=true"
 ```
 
 Each row carries `tokens_input`, `tokens_output`, `tokens_total`, `request_count`,
-`sum_duration_ms` and `cost_nanousd` (summed spend; divide by 1e9 for USD), so you can
+`sum_duration_ms`, `cost_nanousd` (summed spend; divide by 1e9 for USD) and
+`cache_read_tokens` / `cache_write_tokens` (the cached part of `tokens_input`), so you can
 compute tokens per request, cost per request, average latency and error share yourself. The signals that usually separate greedy from worthy:
 
 - high `tokens_total / request_count` on a trivial `action_id` (bloated prompts),

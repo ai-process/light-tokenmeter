@@ -19,7 +19,7 @@ func outboxEvent(meta map[string]string) *domain.UsageEvent {
 		EventID: uuid.New(), OccurredAt: &now, UserID: "u", ProjectID: "p", ActionID: "a",
 		Vendor: "openai", Model: "m", Status: domain.StatusError, DurationMs: 12,
 		TokensInput: 3, TokensOutput: 4, TokensTotal: 7, ErrorClass: "rate_limited", VendorHTTPStatus: 429,
-		Meta: meta, CostNanoUSD: 99,
+		Meta: meta, CostNanoUSD: 99, CacheReadTokens: 2, CacheWriteTokens: 1,
 	}
 }
 
@@ -87,6 +87,8 @@ func TestOutboxClaimAckAndTakeOver(t *testing.T) {
 	require.Equal(t, first.ErrorClass, stored.ErrorClass)
 	require.Equal(t, first.VendorHTTPStatus, stored.VendorHTTPStatus)
 	require.Equal(t, first.CostNanoUSD, stored.CostNanoUSD)
+	require.Equal(t, first.CacheReadTokens, stored.CacheReadTokens)
+	require.Equal(t, first.CacheWriteTokens, stored.CacheWriteTokens)
 	require.False(t, stored.CreatedAt.IsZero())
 
 	require.NoError(t, repo.AckOutbox(ctx, b1.ID))

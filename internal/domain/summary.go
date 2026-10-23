@@ -43,4 +43,7 @@ type SummaryRow struct {
 	RequestCount  int64
 	SumDurationMs int64
 	CostNanoUSD   int64
+	// Parts of TokensInput served from and written to the prompt cache.
+	CacheReadTokens  int64
+	CacheWriteTokens int64
 }
