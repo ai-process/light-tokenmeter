@@ -173,19 +173,21 @@ func (s *GRPCServer) GetUsageSummary(ctx context.Context, req *pb.GetUsageSummar
 	pbRows := make([]*pb.UsageSummaryRow, 0, len(rows))
 	for _, row := range rows {
 		pbRows = append(pbRows, &pb.UsageSummaryRow{
-			Bucket:        timestamppb.New(row.Bucket),
-			ProjectId:     row.ProjectID,
-			UserId:        row.UserID,
-			Vendor:        row.Vendor,
-			Model:         row.Model,
-			ActionId:      row.ActionID,
-			Status:        domainStatusToProto(row.Status),
-			TokensInput:   row.TokensInput,
-			TokensOutput:  row.TokensOutput,
-			TokensTotal:   row.TokensTotal,
-			RequestCount:  row.RequestCount,
-			SumDurationMs: row.SumDurationMs,
-			CostNanousd:   row.CostNanoUSD,
+			Bucket:           timestamppb.New(row.Bucket),
+			ProjectId:        row.ProjectID,
+			UserId:           row.UserID,
+			Vendor:           row.Vendor,
+			Model:            row.Model,
+			ActionId:         row.ActionID,
+			Status:           domainStatusToProto(row.Status),
+			TokensInput:      row.TokensInput,
+			TokensOutput:     row.TokensOutput,
+			TokensTotal:      row.TokensTotal,
+			RequestCount:     row.RequestCount,
+			SumDurationMs:    row.SumDurationMs,
+			CostNanousd:      row.CostNanoUSD,
+			CacheReadTokens:  row.CacheReadTokens,
+			CacheWriteTokens: row.CacheWriteTokens,
 		})
 	}
 
@@ -217,14 +219,16 @@ func (s *GRPCServer) GetUsageByMeta(ctx context.Context, req *pb.GetUsageByMetaR
 	pbRows := make([]*pb.UsageByMetaRow, 0, len(rows))
 	for _, row := range rows {
 		pbRows = append(pbRows, &pb.UsageByMetaRow{
-			GroupValue:   row.GroupValue,
-			Vendor:       row.Vendor,
-			Model:        row.Model,
-			TokensInput:  row.TokensInput,
-			TokensOutput: row.TokensOutput,
-			TokensTotal:  row.TokensTotal,
-			RequestCount: row.RequestCount,
-			CostNanousd:  row.CostNanoUSD,
+			GroupValue:       row.GroupValue,
+			Vendor:           row.Vendor,
+			Model:            row.Model,
+			TokensInput:      row.TokensInput,
+			TokensOutput:     row.TokensOutput,
+			TokensTotal:      row.TokensTotal,
+			RequestCount:     row.RequestCount,
+			CostNanousd:      row.CostNanoUSD,
+			CacheReadTokens:  row.CacheReadTokens,
+			CacheWriteTokens: row.CacheWriteTokens,
 		})
 	}
 	return &pb.GetUsageByMetaResponse{
@@ -250,6 +254,8 @@ func protoToEvent(pbEvent *pb.UsageEvent) (*domain.UsageEvent, error) {
 		VendorHTTPStatus: pbEvent.VendorHttpStatus,
 		Meta:             pbEvent.Meta,
 		CostNanoUSD:      pbEvent.CostNanousd,
+		CacheReadTokens:  pbEvent.CacheReadTokens,
+		CacheWriteTokens: pbEvent.CacheWriteTokens,
 	}
 
 	// Parse event_id

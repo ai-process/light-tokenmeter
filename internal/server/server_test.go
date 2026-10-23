@@ -152,6 +152,26 @@ func TestProtoToEvent_Cost(t *testing.T) {
 	assert.ErrorContains(t, err, "cost_nanousd must not be negative")
 }
 
+func TestProtoToEvent_CacheTokens(t *testing.T) {
+	event := func(read, write int64) *pb.UsageEvent {
+		return &pb.UsageEvent{
+			EventId: uuid.NewString(), UserId: "u1", ProjectId: "p1", ActionId: "a1",
+			Vendor: "anthropic", Model: "claude", Status: pb.Status_STATUS_SUCCESS,
+			TokensInput: 100, TokensOutput: 5, CacheReadTokens: read, CacheWriteTokens: write,
+		}
+	}
+	ev, err := protoToEvent(event(70, 30))
+	require.NoError(t, err)
+	assert.Equal(t, int64(70), ev.CacheReadTokens)
+	assert.Equal(t, int64(30), ev.CacheWriteTokens)
+	assert.Equal(t, int64(105), ev.TokensTotal, "cache tokens are part of tokens_input, not added")
+
+	for _, bad := range [][2]int64{{71, 30}, {-1, 0}, {0, -1}, {101, 0}, {0, 101}} {
+		_, err = protoToEvent(event(bad[0], bad[1]))
+		assert.ErrorContains(t, err, "cache_read_tokens", "read=%d write=%d", bad[0], bad[1])
+	}
+}
+
 func testVerifier(t *testing.T) *auth.Verifier {
 	t.Helper()
 	sum := func(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
@@ -340,4 +360,18 @@ func TestSummaryOmitsUngroupedStatus(t *testing.T) {
 	}
 	assert.NotContains(t, get("&group_by_model=true"), `"status"`)
 	assert.Contains(t, get("&group_by_status=true"), `"status":"success"`)
+}
+
+func TestHTTP_CacheTokens(t *testing.T) {
+	var req recordEventRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"event_id":"`+uuid.NewString()+`","user_id":"u","project_id":"p",
+		"action_id":"a","vendor":"anthropic","model":"claude","status":"success",
+		"tokens_input":100,"tokens_output":5,"cache_read_tokens":60,"cache_write_tokens":40}`), &req))
+	ev, err := httpRequestToEvent(&req)
+	require.NoError(t, err)
+	assert.Equal(t, [2]int64{60, 40}, [2]int64{ev.CacheReadTokens, ev.CacheWriteTokens})
+
+	out, err := json.Marshal(summaryRow{CacheReadTokens: 7, CacheWriteTokens: 3})
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `"cache_read_tokens":7,"cache_write_tokens":3`)
 }

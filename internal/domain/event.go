@@ -69,6 +69,10 @@ type UsageEvent struct {
 	VendorHTTPStatus int32
 	Meta             map[string]string
 	CostNanoUSD      int64
+	// Prompt-cache tokens, both part of TokensInput: read from the vendor's
+	// cache, and written to it, each priced differently from plain input.
+	CacheReadTokens  int64
+	CacheWriteTokens int64
 }
 
 // Validation errors
@@ -86,6 +90,7 @@ var (
 	ErrVendorTooLong     = errors.New("vendor exceeds 64 characters")
 	ErrModelTooLong      = errors.New("model exceeds 128 characters")
 	ErrTokensMismatch    = errors.New("tokens_total must equal tokens_input + tokens_output")
+	ErrCacheTokens       = errors.New("cache_read_tokens and cache_write_tokens must be >= 0 and together not exceed tokens_input")
 	ErrNegativeCost      = errors.New("cost_nanousd must not be negative")
 	ErrOccurredAtRange   = errors.New("occurred_at must be between 1900-01-01 and 2262-04-10")
 	ErrErrorClassTooLong = errors.New("error_class exceeds 256 characters")
@@ -149,6 +154,12 @@ func (e *UsageEvent) Validate() error {
 	}
 	if e.CostNanoUSD < 0 {
 		return ErrNegativeCost
+	}
+	// Checked only when sent, so events without them validate as before; the
+	// subtraction cannot overflow once 0 <= read <= input.
+	if (e.CacheReadTokens != 0 || e.CacheWriteTokens != 0) && (e.CacheReadTokens < 0 || e.CacheWriteTokens < 0 ||
+		e.CacheReadTokens > e.TokensInput || e.CacheWriteTokens > e.TokensInput-e.CacheReadTokens) {
+		return ErrCacheTokens
 	}
 	if len(e.ErrorClass) > MaxStringLength {
 		return ErrErrorClassTooLong
