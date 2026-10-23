@@ -8,9 +8,10 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+' # no pre-releases: latest and X.Y assume stable tags
 
-# One release at a time, so a slower older run cannot move latest back.
+# Per tag: a queue shared by all tags would drop the middle one of three.
+# Push one release tag at a time, so an older run cannot move latest back.
 concurrency:
-  group: release
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -62,7 +63,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      # A backport (v1.0.5 after v1.1.0) is published but not marked Latest.
       - name: Publish the GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+        run: |
+          top=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest=$([ "$top" = "$GITHUB_REF_NAME" ] && echo true || echo false)

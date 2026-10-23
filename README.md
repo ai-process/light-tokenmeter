@@ -516,7 +516,7 @@ The [Release](.github/workflows/release.yml) workflow then runs the upgrade test
 releases and `govulncheck`, creates the GitHub Release from the changelog section, and publishes
 the signed multi-arch image `coyl/light-tokenmeter:1.0.0`; `1.0` moves to it when it is the newest
 release of 1.0.x, and `latest` when it is the newest release of all. Tags are `vX.Y.Z` only, with
-no pre-releases. The repository needs the secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD`. Run
+no pre-releases; push one release tag at a time. The repository needs the secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD`. Run
 the upgrade test locally (needs Docker) with `./scripts/upgrade-test.sh`.
 
 Pull requests are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
