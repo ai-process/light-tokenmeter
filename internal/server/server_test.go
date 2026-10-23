@@ -30,6 +30,7 @@ import (
 	"github.com/ai-process/light-tokenmeter/internal/auth"
 	"github.com/ai-process/light-tokenmeter/internal/domain"
 	"github.com/ai-process/light-tokenmeter/internal/metrics"
+	"github.com/ai-process/light-tokenmeter/internal/service"
 
 	pb "github.com/ai-process/light-tokenmeter/gen/usage/v1"
 )
@@ -313,4 +314,30 @@ func TestRequestAndEventMetrics(t *testing.T) {
 	_, err = pb.NewUsageServiceClient(conn).RecordUsageEvents(context.Background(), &pb.RecordUsageEventsRequest{})
 	require.Equal(t, codes.Unauthenticated, status.Code(err))
 	assert.Equal(t, before+1, testutil.ToFloat64(refused), "calls refused by auth are counted")
+}
+
+type fixedAnalytics struct{ rows []domain.SummaryRow }
+
+func (f fixedAnalytics) QuerySummary(context.Context, domain.SummaryParams) ([]domain.SummaryRow, bool, error) {
+	return f.rows, false, nil
+}
+func (fixedAnalytics) QueryUsageByMeta(context.Context, domain.MetaUsageParams) ([]domain.MetaUsageRow, bool, error) {
+	return nil, false, nil
+}
+func (fixedAnalytics) Ping(context.Context) error { return nil }
+
+// Grouping fields appear only when grouped by; status was always "unspecified".
+func TestSummaryOmitsUngroupedStatus(t *testing.T) {
+	svc := service.NewUsageService(nil).WithAnalytics(fixedAnalytics{rows: []domain.SummaryRow{{
+		Bucket: time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC), Model: "m", Status: domain.StatusSuccess, TokensTotal: 3, RequestCount: 1,
+	}}})
+	h := NewHTTPServerWithService(svc, nil, ":0", nil).server.Handler
+	get := func(query string) string {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/usage/summary?from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z"+query, nil))
+		require.Equal(t, http.StatusOK, w.Code)
+		return w.Body.String()
+	}
+	assert.NotContains(t, get("&group_by_model=true"), `"status"`)
+	assert.Contains(t, get("&group_by_status=true"), `"status":"success"`)
 }

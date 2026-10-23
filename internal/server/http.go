@@ -318,6 +318,11 @@ func (s *HTTPServer) handleGetSummary(w http.ResponseWriter, r *http.Request) {
 
 	respRows := make([]summaryRow, 0, len(rows))
 	for _, row := range rows {
+		// Like the other grouping fields, status is left out unless grouped by.
+		var status string
+		if params.GroupByStatus {
+			status = row.Status.String()
+		}
 		respRows = append(respRows, summaryRow{
 			Bucket:        row.Bucket.Format(time.RFC3339),
 			ProjectID:     row.ProjectID,
@@ -325,7 +330,7 @@ func (s *HTTPServer) handleGetSummary(w http.ResponseWriter, r *http.Request) {
 			Vendor:        row.Vendor,
 			Model:         row.Model,
 			ActionID:      row.ActionID,
-			Status:        row.Status.String(),
+			Status:        status,
 			TokensInput:   row.TokensInput,
 			TokensOutput:  row.TokensOutput,
 			TokensTotal:   row.TokensTotal,
