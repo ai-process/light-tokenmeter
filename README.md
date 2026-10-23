@@ -5,12 +5,13 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
 A very small service that answers one question: **who is spending your LLM tokens, and
-are they worth it?** Your apps (or a gateway such as
+are they worth it?** Your apps (or a gateway such as Keystone,
 [KTMS](https://github.com/ai-process/ktms)) push one event per model call; you
 query totals by project, user, action, vendor, model or status and see who is greedy and
 who is worthy.
 
-- One static Go binary, one Postgres table, a small image (see [Resource footprint](#resource-footprint)). No queue, no cache, no UI.
+- One static Go binary, one Postgres database, a small image (see [Resource footprint](#resource-footprint)). No queue, no cache, no UI.
+- **Bearer-token authentication** with `write` and `read` scopes, and Prometheus metrics.
 - **Append-only and idempotent.** Every event has a UUID; sending it twice is harmless.
 - **Fast writes.** Batches of up to 500 events are inserted with a single `COPY`.
 - **Flexible reads.** Time-bucketed (per day) summaries with any combination of filters
@@ -60,10 +61,10 @@ The schema is created automatically on startup.
 
 ## Resource footprint
 
-The published image `coyl/light-tokenmeter:0.1.1` (`latest`) is ~28 MB uncompressed and ~11 MB to
-download for linux/amd64 (Docker Hub manifest and `docker image inspect`). That image is Alpine-based;
-the distroless runtime in the current [`Dockerfile`](Dockerfile) is not released yet. Memory,
-readiness and throughput have not been measured.
+The image `coyl/light-tokenmeter:0.1.1` was ~28 MB uncompressed and ~11 MB to download for
+linux/amd64 (Docker Hub manifest and `docker image inspect`). It was Alpine-based; from 0.1.2 the
+runtime is distroless (static, nonroot). Memory, readiness and throughput have not been measured
+yet.
 
 ## Installation
 
@@ -72,7 +73,7 @@ readiness and throughput have not been measured.
 Release images are published for `linux/amd64` and `linux/arm64`:
 
 ```bash
-docker pull coyl/light-tokenmeter:latest     # or pin a tag, e.g. coyl/light-tokenmeter:0.1.0
+docker pull coyl/light-tokenmeter:latest     # or pin a release, e.g. coyl/light-tokenmeter:1.0.0
 ```
 
 It needs only a Postgres database:
@@ -98,7 +99,8 @@ services:
 ```
 
 Kubernetes: liveness probe `GET :8080/healthz`, readiness probe `GET :8080/readyz` (checks the
-database). The service is stateless, so run as many replicas as you like.
+database). The service is stateless, so run as many replicas as you like. Images are signed; see
+[Verifying a release](SECURITY.md#verifying-a-release).
 
 ### From source
 
@@ -262,6 +264,15 @@ releases fix bugs.
 Not public, and free to change in any release: log message text (other than the prefix above),
 the `internal/` Go packages, the outbox's lease and retry timings, and resource numbers.
 
+### Compatibility with KTMS and ktms-admin
+
+| light-tokenmeter | Keystone (KTMS) | ktms-admin | Authentication |
+| --- | --- | --- | --- |
+| 1.x | 1.x | 1.x | On or off. With it on, KTMS needs `USAGE_COLLECTOR_TOKEN` (`write`) and ktms-admin `TOKENMETER_TOKEN` (`read`). |
+| 1.x | 0.x | 0.x | Off only: releases before 1.0 send no token. |
+
+`usage.v1` stays compatible within 1.x, so any KTMS 1.x reports to any light-tokenmeter 1.x.
+
 ### Versions and upgrades
 
 - **Within 1.x, upgrade in one step** from any earlier 1.x release: Postgres and ClickHouse
@@ -311,6 +322,9 @@ Environment variables (see [`env.example`](env.example)):
 | `CLICKHOUSE_FLUSH_INTERVAL` | `1s` | How often waiting events are copied to ClickHouse; reports lag by about this much. |
 
 ## Security
+
+See [SECURITY.md](SECURITY.md) for reporting vulnerabilities, verifying releases and running the
+service safely.
 
 ### Authentication
 
@@ -490,14 +504,20 @@ Layout: `cmd/server` (entrypoint), `internal/server` (HTTP + gRPC), `internal/se
 
 ### Releasing
 
-Pushing a git tag publishes a multi-arch image to Docker Hub as `coyl/light-tokenmeter:<tag>`
-(and `latest` for semver tags), once the upgrade test from earlier releases passes. The repository
-needs the secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD`. Run the upgrade test locally (needs
-Docker) with `./scripts/upgrade-test.sh`.
+1. Move the `[Unreleased]` entries of [`CHANGELOG.md`](CHANGELOG.md) under a new version heading
+   with today's date, in a pull request.
+2. After it is merged, tag main and push the tag:
 
-```bash
-git tag 0.1.0 && git push origin 0.1.0
-```
+   ```bash
+   git tag v1.0.0 && git push origin v1.0.0
+   ```
+
+The [Release](.github/workflows/release.yml) workflow then runs the upgrade test from earlier
+releases and `govulncheck`, creates the GitHub Release from the changelog section, and publishes
+the signed multi-arch image `coyl/light-tokenmeter:1.0.0`; `1.0` moves to it when it is the newest
+release of 1.0.x, and `latest` when it is the newest release of all. Tags are `vX.Y.Z` only, with
+no pre-releases; push one release tag at a time. The repository needs the secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD`. Run
+the upgrade test locally (needs Docker) with `./scripts/upgrade-test.sh`.
 
 Pull requests are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

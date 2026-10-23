@@ -1,0 +1,75 @@
+name: Release
+
+# Tag vX.Y.Z -> the full test workflow (with the upgrade test from earlier
+# releases), a draft GitHub Release, the signed image, then the release is
+# published. Re-running after a failure picks up where it stopped.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+' # no pre-releases: latest and X.Y assume stable tags
+
+# Per tag: a queue shared by all tags would drop the middle one of three.
+# Push one release tag at a time, so an older run cannot move latest back.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/test.yml
+
+  draft:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The notes are this version's CHANGELOG section; a tag without one is a
+      # mistake, so the release stops here.
+      - name: Draft the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          awk -v h="## [$v]" 'index($0, h) == 1 {on=1; next} on && (/^## \[/ || /^\[[^]]+\]: /) {exit} on' CHANGELOG.md > notes.md
+          grep -q '[^[:space:]]' notes.md || { echo "CHANGELOG.md has no section for $v" >&2; exit 1; }
+          cat >> notes.md <<NOTES
+
+          Image: \`coyl/light-tokenmeter:$v\` (linux/amd64, linux/arm64), signed with cosign; see [Verifying a release](https://github.com/ai-process/light-tokenmeter/blob/$GITHUB_REF_NAME/SECURITY.md#verifying-a-release).
+          NOTES
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --draft --title "light-tokenmeter $v" --notes-file notes.md --verify-tag
+          fi
+
+  images:
+    needs: draft
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/docker-publish.yml
+    secrets:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+
+  publish:
+    needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      # A backport (v1.0.5 after v1.1.0) is published but not marked Latest.
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          top=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest=$([ "$top" = "$GITHUB_REF_NAME" ] && echo true || echo false)

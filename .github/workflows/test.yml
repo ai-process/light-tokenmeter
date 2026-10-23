@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call: # release.yml runs it as the release gate
 
 jobs:
   test:
@@ -45,6 +46,21 @@ jobs:
           REQUIRE_DB: "1" # the Postgres and ClickHouse tests fail rather than skip
         run: go test -race ./...
 
+  # A known vulnerability that our code reaches fails the build; one in a
+  # dependency we never call is only reported.
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          govulncheck ./...
+
   # README "Versions and upgrades": the previous release and the oldest one of
   # the same major write Postgres and ClickHouse, this build must serve them,
   # and the old release must still serve on the migrated schema.
@@ -59,6 +75,8 @@ jobs:
           go-version: '1.27.3'
           cache: true
       - name: Upgrade from earlier releases
+        env:
+          CUR: ${{ github.ref_type == 'tag' && github.ref_name || '' }} # a release tag is not its own predecessor
         run: ./scripts/upgrade-test.sh
 
   docker:
