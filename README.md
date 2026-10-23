@@ -266,11 +266,10 @@ the `internal/` Go packages, the outbox's lease and retry timings, and resource 
 
 ### Compatibility with KTMS and ktms-admin
 
-| light-tokenmeter | Keystone (KTMS) | ktms-admin | Notes |
+| light-tokenmeter | Keystone (KTMS) | ktms-admin | Authentication |
 | --- | --- | --- | --- |
-| 1.x | 1.x | 1.x | With authentication on, KTMS needs `USAGE_COLLECTOR_TOKEN` (`write`) and ktms-admin `TOKENMETER_TOKEN` (`read`). |
-| 1.x | 0.14.x | 0.4.x | Only with authentication off: those releases send no token. |
-| 0.1.x | 0.13.x – 0.14.x | 0.3.x – 0.4.x | No compatibility promise before 1.0. |
+| 1.x | 1.x | 1.x | On or off. With it on, KTMS needs `USAGE_COLLECTOR_TOKEN` (`write`) and ktms-admin `TOKENMETER_TOKEN` (`read`). |
+| 1.x | 0.x | 0.x | Off only: releases before 1.0 send no token. |
 
 `usage.v1` stays compatible within 1.x, so any KTMS 1.x reports to any light-tokenmeter 1.x.
 
@@ -515,8 +514,9 @@ Layout: `cmd/server` (entrypoint), `internal/server` (HTTP + gRPC), `internal/se
 
 The [Release](.github/workflows/release.yml) workflow then runs the upgrade test from earlier
 releases and `govulncheck`, creates the GitHub Release from the changelog section, and publishes
-the signed multi-arch image `coyl/light-tokenmeter:1.0.0` (and `1.0` and `latest` when it is the
-newest of its line). The repository needs the secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD`. Run
+the signed multi-arch image `coyl/light-tokenmeter:1.0.0`; `1.0` moves to it when it is the newest
+release of 1.0.x, and `latest` when it is the newest release of all. Tags are `vX.Y.Z` only, with
+no pre-releases. The repository needs the secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD`. Run
 the upgrade test locally (needs Docker) with `./scripts/upgrade-test.sh`.
 
 Pull requests are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md).

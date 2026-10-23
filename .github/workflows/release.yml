@@ -1,70 +1,53 @@
 name: Release
 
-# Tag vX.Y.Z -> checks, a GitHub Release with the CHANGELOG section, then the
-# signed image (docker-publish.yml). Images go last: an image on Docker Hub
-# means the whole release went out, which is how the next one finds it.
+# Tag vX.Y.Z -> the full test workflow (with the upgrade test from earlier
+# releases), a draft GitHub Release, the signed image, then the release is
+# published. Re-running after a failure picks up where it stopped.
 on:
   push:
     tags:
-      - 'v*'
+      - 'v[0-9]+.[0-9]+.[0-9]+' # no pre-releases: latest and X.Y assume stable tags
+
+# One release at a time, so a slower older run cannot move latest back.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  # Earlier releases must upgrade to this one, with Postgres and ClickHouse.
-  upgrade:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version: '1.27.3'
-          cache: true
-      - name: Upgrade from earlier releases
-        env:
-          CUR: ${{ github.ref_name }}
-        run: ./scripts/upgrade-test.sh
+  checks:
+    uses: ./.github/workflows/test.yml
 
-  vuln:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version: '1.27.3'
-          cache: true
-      - name: govulncheck
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
-          govulncheck ./...
-
-  release:
-    needs: [upgrade, vuln]
+  draft:
+    needs: checks
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # The notes are the CHANGELOG section of this version; a tag without one
-      # is a mistake, so the release stops here.
-      - name: GitHub Release
+      # The notes are this version's CHANGELOG section; a tag without one is a
+      # mistake, so the release stops here.
+      - name: Draft the GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           v=${GITHUB_REF_NAME#v}
-          awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {on=1; next} on && /^## \[/ {exit} on' CHANGELOG.md > notes.md
-          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $v" >&2; exit 1; }
+          awk -v h="## [$v]" 'index($0, h) == 1 {on=1; next} on && (/^## \[/ || /^\[[^]]+\]: /) {exit} on' CHANGELOG.md > notes.md
+          grep -q '[^[:space:]]' notes.md || { echo "CHANGELOG.md has no section for $v" >&2; exit 1; }
           cat >> notes.md <<NOTES
 
           Image: \`coyl/light-tokenmeter:$v\` (linux/amd64, linux/arm64), signed with cosign; see [Verifying a release](https://github.com/ai-process/light-tokenmeter/blob/$GITHUB_REF_NAME/SECURITY.md#verifying-a-release).
           NOTES
-          gh release create "$GITHUB_REF_NAME" --title "light-tokenmeter $v" --notes-file notes.md --verify-tag
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --draft --title "light-tokenmeter $v" --notes-file notes.md --verify-tag
+          fi
 
   images:
-    needs: release
+    needs: draft
     permissions:
       contents: read
       id-token: write
@@ -72,3 +55,14 @@ jobs:
     secrets:
       DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
       DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+
+  publish:
+    needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest

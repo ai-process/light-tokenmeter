@@ -1,7 +1,7 @@
 name: Publish Docker image
 
 # Every vX.Y.Z release becomes a signed multi-arch image coyl/light-tokenmeter:X.Y.Z
-# (and X.Y and latest for the newest of their line), with SBOM and provenance.
+# with SBOM and provenance; X.Y follows the newest release of its line, latest the newest of all.
 # Called by release.yml. Needs the secrets DOCKER_USERNAME and DOCKER_PASSWORD.
 on:
   workflow_call:
@@ -28,7 +28,7 @@ jobs:
       - name: Is this the newest release
         id: newest
         run: |
-          stable=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$')
+          stable=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
           line=$(echo "$GITHUB_REF_NAME" | sed -E 's/^(v[0-9]+\.[0-9]+)\..*/\1/')
           top=$(echo "$stable" | head -n 1)
           top_line=$(echo "$stable" | grep "^$line\." | head -n 1)
@@ -81,6 +81,6 @@ jobs:
         run: |
           for i in 1 2 3; do
             cosign sign --yes --recursive "coyl/light-tokenmeter@${{ steps.build.outputs.digest }}" && exit 0
-            sleep $((i * 15))
+            [ "$i" -lt 3 ] && sleep $((i * 15))
           done
           exit 1

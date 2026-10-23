@@ -8,7 +8,7 @@ any potential vulnerability.
 | Version | Supported |
 | ------- | --------- |
 | `1.x`, latest minor release | :white_check_mark: |
-| `0.1.x` | :white_check_mark: until 1.0.0 is released |
+| `0.1.x` | :x: upgrade to 1.0 (one step, see [Versions and upgrades](README.md#versions-and-upgrades)) |
 
 ## Verifying a Release
 
