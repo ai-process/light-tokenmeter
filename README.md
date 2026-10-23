@@ -194,7 +194,7 @@ compute tokens per request, cost per request, average latency and error share yo
 
 Filters: `project_id`, `user_id`, `vendor`, `model`, `action_id`, `status` (must be `success`, `error`, `cancelled`, or `timeout`; invalid values return 400). Groupings:
 `group_by_project_id`, `group_by_user_id`, `group_by_vendor`, `group_by_model`,
-`group_by_action_id`, `group_by_status` (each `=true`).
+`group_by_action_id`, `group_by_status` (each `=true`). Fields you do not group by are left out of the rows.
 
 Responses group by day based on event time (`occurred_at`, falling back to `created_at`). If query results exceed 10,000 rows, the response returns `truncated: true` and caps results at 10,000.
 
