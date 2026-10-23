@@ -1,57 +1,63 @@
 name: Publish Docker image
 
-# Every pushed tag becomes an image on Docker Hub: coyl/light-tokenmeter:<tag>.
-# Needs the repository secrets DOCKER_USERNAME and DOCKER_PASSWORD (an access token).
+# Every vX.Y.Z release becomes a signed multi-arch image coyl/light-tokenmeter:X.Y.Z
+# (and X.Y and latest for the newest of their line), with SBOM and provenance.
+# Called by release.yml. Needs the secrets DOCKER_USERNAME and DOCKER_PASSWORD.
 on:
-  push:
-    tags:
-      - '*'
+  workflow_call:
+    secrets:
+      DOCKER_USERNAME:
+        required: true
+      DOCKER_PASSWORD:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # keyless cosign signing with the workflow's GitHub OIDC identity
 
 jobs:
-  # No image is published unless earlier releases upgrade to this one.
-  upgrade:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27.3'
-          cache: true
-      - name: Upgrade from earlier releases
-        env:
-          CUR: ${{ github.ref_name }}
-        run: ./scripts/upgrade-test.sh
 
-  publish:
-    needs: upgrade
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      # A backport or a late re-run must not move latest or X.Y back to an
+      # older build: each follows only the newest tag of its line.
+      - name: Is this the newest release
+        id: newest
+        run: |
+          stable=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$')
+          line=$(echo "$GITHUB_REF_NAME" | sed -E 's/^(v[0-9]+\.[0-9]+)\..*/\1/')
+          top=$(echo "$stable" | head -n 1)
+          top_line=$(echo "$stable" | grep "^$line\." | head -n 1)
+          echo "yes=$([ "$top" = "$GITHUB_REF_NAME" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "line=$([ "$top_line" = "$GITHUB_REF_NAME" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
+      # Image tags carry no "v" (coyl/light-tokenmeter:1.0.0), as since 0.1.0.
       - name: Compute image tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: coyl/light-tokenmeter
           tags: |
-            type=ref,event=tag
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-          flavor: latest=auto
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.newest.outputs.line }}
+          flavor: |
+            latest=${{ steps.newest.outputs.yes }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -61,5 +67,20 @@ jobs:
           build-args: VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: false
-          sbom: false
+          provenance: mode=max
+          sbom: true
+
+      # Pinned by commit: this job can mint signatures under the release identity.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      # Signs the index and, with --recursive, each platform manifest. Retried:
+      # a Rekor or Fulcio blip must not leave a pushed tag unsigned.
+      - name: Sign the image
+        run: |
+          for i in 1 2 3; do
+            cosign sign --yes --recursive "coyl/light-tokenmeter@${{ steps.build.outputs.digest }}" && exit 0
+            sleep $((i * 15))
+          done
+          exit 1
