@@ -40,6 +40,9 @@ All notable changes to light-tokenmeter are listed here. The format follows
 - Summary rows leave out `status` unless grouped by it, like the other grouping fields.
 - Relicensed under Apache 2.0.
 
+### Security
+- clickhouse-go v2.49.0 with ch-go v0.74.0, fixing GO-2025-3603 in the ClickHouse protocol reader.
+
 ## [0.1.2] - 2026-10-21
 
 ### Added
