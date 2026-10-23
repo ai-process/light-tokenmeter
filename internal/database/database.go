@@ -49,7 +49,7 @@ func Connect(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	}
 
 	log.Info().
-		Str("url", maskPassword(cfg.URL)).
+		Str("database", describe(poolConfig)).
 		Int32("max_conns", cfg.MaxConns).
 		Int32("min_conns", cfg.MinConns).
 		Msg("connected to database")
@@ -80,8 +80,9 @@ func RunMigrations(ctx context.Context, databaseURL string) error {
 	return nil
 }
 
-// maskPassword masks the password in a database URL for logging
-func maskPassword(url string) string {
-	// Simple masking for logging - just replace password portion
-	return url // In production, implement proper URL parsing and masking
+// describe names the database for logs without the password, whatever form
+// DATABASE_URL takes (URL or key=value).
+func describe(c *pgxpool.Config) string {
+	cc := c.ConnConfig
+	return fmt.Sprintf("%s@%s:%d/%s", cc.User, cc.Host, cc.Port, cc.Database)
 }
