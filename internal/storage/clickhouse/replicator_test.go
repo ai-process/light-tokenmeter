@@ -82,7 +82,7 @@ func (b *poisonBatch) Send() error {
 	return b.Batch.Send()
 }
 
-type totals struct{ requests, tokens, cost int64 }
+type totals struct{ requests, tokens, cost, cacheRead, cacheWrite int64 }
 
 func pgTotals(t *testing.T, repo *repository.Repository, from, to time.Time) totals {
 	rows, _, err := repo.QuerySummary(context.Background(), domain.SummaryParams{From: from, To: to})
@@ -92,6 +92,8 @@ func pgTotals(t *testing.T, repo *repository.Repository, from, to time.Time) tot
 		out.requests += r.RequestCount
 		out.tokens += r.TokensTotal
 		out.cost += r.CostNanoUSD
+		out.cacheRead += r.CacheReadTokens
+		out.cacheWrite += r.CacheWriteTokens
 	}
 	return out
 }
@@ -104,6 +106,8 @@ func chTotals(t *testing.T, c *Client, from, to time.Time) totals {
 		out.requests += r.RequestCount
 		out.tokens += r.TokensTotal
 		out.cost += r.CostNanoUSD
+		out.cacheRead += r.CacheReadTokens
+		out.cacheWrite += r.CacheWriteTokens
 	}
 	return out
 }
@@ -131,6 +135,7 @@ func (s *stack) record(t *testing.T, n int, model string) {
 			EventID: uuid.New(), OccurredAt: &at, UserID: "u", ProjectID: "p", ActionID: "a",
 			Vendor: "openai", Model: model, Status: domain.StatusSuccess,
 			TokensInput: int64(i % 7), TokensOutput: 3, TokensTotal: int64(i%7) + 3, CostNanoUSD: int64(i),
+			CacheReadTokens: int64(i % 7 / 2), CacheWriteTokens: int64(i % 7 % 2),
 		})
 	}
 	_, err := s.repo.InsertBatch(context.Background(), batch)

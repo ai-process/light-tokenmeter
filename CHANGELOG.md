@@ -15,6 +15,10 @@ ktms-admin 1.0. From here on, what [API stability](README.md#api-stability) list
 incompatibly only in a new major version. Upgrade from 0.1.x in one step.
 
 ### Added
+- `cache_read_tokens` and `cache_write_tokens` on usage events (`usage.v1` fields 17 and 18) and
+  summed in summary and by-meta rows: the input tokens read from and written to the vendor's
+  prompt cache, which vendors bill apart from plain input. They are part of `tokens_input`.
+  Stored in Postgres and ClickHouse; events from older callers carry 0.
 - Authentication: bearer tokens with `write` and `read` scopes, configured as SHA-256 hashes in
   `TOKENMETER_TOKENS` or `TOKENMETER_TOKENS_FILE`, several at once for rotation. Refusals are
   `401`/`403` over HTTP and `UNAUTHENTICATED`/`PERMISSION_DENIED` over gRPC. Without tokens the

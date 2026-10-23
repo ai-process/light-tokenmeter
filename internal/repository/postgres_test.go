@@ -198,18 +198,20 @@ func TestCostAggregation(t *testing.T) {
 
 	newEvent := func(model string, cost int64) *domain.UsageEvent {
 		return &domain.UsageEvent{
-			EventID:      uuid.New(),
-			UserID:       "u1",
-			ProjectID:    "p1",
-			ActionID:     "a1",
-			Vendor:       "openai",
-			Model:        model,
-			Status:       domain.StatusSuccess,
-			TokensInput:  10,
-			TokensOutput: 20,
-			TokensTotal:  30,
-			Meta:         map[string]string{"job_id": "job-cost"},
-			CostNanoUSD:  cost,
+			EventID:          uuid.New(),
+			UserID:           "u1",
+			ProjectID:        "p1",
+			ActionID:         "a1",
+			Vendor:           "openai",
+			Model:            model,
+			Status:           domain.StatusSuccess,
+			TokensInput:      10,
+			TokensOutput:     20,
+			TokensTotal:      30,
+			Meta:             map[string]string{"job_id": "job-cost"},
+			CostNanoUSD:      cost,
+			CacheReadTokens:  6,
+			CacheWriteTokens: 2,
 		}
 	}
 
@@ -229,19 +231,28 @@ func TestCostAggregation(t *testing.T) {
 	})
 	require.NoError(t, err)
 	byModel := map[string]int64{}
+	var cacheRead, cacheWrite int64
 	for _, r := range summary {
 		byModel[r.Model] += r.CostNanoUSD
+		cacheRead += r.CacheReadTokens
+		cacheWrite += r.CacheWriteTokens
 	}
+	assert.Equal(t, int64(18), cacheRead, "InsertOne and InsertBatch both store cache tokens")
+	assert.Equal(t, int64(6), cacheWrite)
 	assert.Equal(t, int64(3_000_000), byModel["gpt-4o"])
 	assert.Equal(t, int64(150_000), byModel["gpt-4o-mini"])
 
 	metaRows, _, err := repo.QueryUsageByMeta(ctx, domain.MetaUsageParams{MetaKey: "job_id", MetaValue: "job-cost"})
 	require.NoError(t, err)
-	var total int64
+	var total, metaCacheRead, metaCacheWrite int64
 	for _, r := range metaRows {
 		total += r.CostNanoUSD
+		metaCacheRead += r.CacheReadTokens
+		metaCacheWrite += r.CacheWriteTokens
 	}
 	assert.Equal(t, int64(3_150_000), total)
+	assert.Equal(t, int64(18), metaCacheRead)
+	assert.Equal(t, int64(6), metaCacheWrite)
 }
 
 // A retried batch inserts nothing new, and InsertBatch says so by ID, so the

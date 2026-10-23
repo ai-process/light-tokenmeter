@@ -217,7 +217,8 @@ func (r *Replicator) insert(ctx context.Context, batch uuid.UUID, events []*doma
 			user_id, project_id, action_id,
 			vendor, model, status, duration_ms,
 			tokens_input, tokens_output, tokens_total,
-			error_class, vendor_http_status, meta, cost_nanousd
+			error_class, vendor_http_status, meta, cost_nanousd,
+			cache_read_tokens, cache_write_tokens
 		)
 	`)
 	if err != nil {
@@ -265,6 +266,8 @@ func (r *Replicator) insert(ctx context.Context, batch uuid.UUID, events []*doma
 			vendorStatus,
 			meta,
 			ev.CostNanoUSD,
+			ev.CacheReadTokens,
+			ev.CacheWriteTokens,
 		)
 		if err != nil {
 			_ = b.Abort()

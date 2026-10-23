@@ -137,6 +137,8 @@ type recordEventRequest struct {
 	VendorHTTPStatus int32             `json:"vendor_http_status,omitempty"`
 	Meta             map[string]string `json:"meta,omitempty"`
 	CostNanoUSD      int64             `json:"cost_nanousd,omitempty"`
+	CacheReadTokens  int64             `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64             `json:"cache_write_tokens,omitempty"`
 }
 
 type recordEventResponse struct {
@@ -183,6 +185,9 @@ type summaryRow struct {
 	RequestCount  int64  `json:"request_count"`
 	SumDurationMs int64  `json:"sum_duration_ms"`
 	CostNanoUSD   int64  `json:"cost_nanousd"`
+	// Parts of tokens_input read from and written to the prompt cache.
+	CacheReadTokens  int64 `json:"cache_read_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
 }
 
 type getSummaryResponse struct {
@@ -324,19 +329,21 @@ func (s *HTTPServer) handleGetSummary(w http.ResponseWriter, r *http.Request) {
 			status = row.Status.String()
 		}
 		respRows = append(respRows, summaryRow{
-			Bucket:        row.Bucket.Format(time.RFC3339),
-			ProjectID:     row.ProjectID,
-			UserID:        row.UserID,
-			Vendor:        row.Vendor,
-			Model:         row.Model,
-			ActionID:      row.ActionID,
-			Status:        status,
-			TokensInput:   row.TokensInput,
-			TokensOutput:  row.TokensOutput,
-			TokensTotal:   row.TokensTotal,
-			RequestCount:  row.RequestCount,
-			SumDurationMs: row.SumDurationMs,
-			CostNanoUSD:   row.CostNanoUSD,
+			Bucket:           row.Bucket.Format(time.RFC3339),
+			ProjectID:        row.ProjectID,
+			UserID:           row.UserID,
+			Vendor:           row.Vendor,
+			Model:            row.Model,
+			ActionID:         row.ActionID,
+			Status:           status,
+			TokensInput:      row.TokensInput,
+			TokensOutput:     row.TokensOutput,
+			TokensTotal:      row.TokensTotal,
+			RequestCount:     row.RequestCount,
+			SumDurationMs:    row.SumDurationMs,
+			CostNanoUSD:      row.CostNanoUSD,
+			CacheReadTokens:  row.CacheReadTokens,
+			CacheWriteTokens: row.CacheWriteTokens,
 		})
 	}
 
@@ -363,6 +370,8 @@ func httpRequestToEvent(req *recordEventRequest) (*domain.UsageEvent, error) {
 		Meta:             req.Meta,
 		OccurredAt:       req.OccurredAt,
 		CostNanoUSD:      req.CostNanoUSD,
+		CacheReadTokens:  req.CacheReadTokens,
+		CacheWriteTokens: req.CacheWriteTokens,
 	}
 
 	if err := event.EventID.UnmarshalText([]byte(req.EventID)); err != nil {
