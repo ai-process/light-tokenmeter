@@ -47,6 +47,7 @@ incompatibly only in a new major version. Upgrade from 0.1.x in one step.
 - Relicensed under Apache 2.0.
 
 ### Security
+- The startup log no longer contains the Postgres password: it named the whole `DATABASE_URL`.
 - clickhouse-go v2.49.0 with ch-go v0.74.0, fixing GO-2025-3603 in the ClickHouse protocol reader.
 
 ## [0.1.2] - 2026-10-21
