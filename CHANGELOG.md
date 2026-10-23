@@ -8,6 +8,12 @@ All notable changes to light-tokenmeter are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-23
+
+The first stable release, together with Keystone. The Model Switchboard. (KTMS) 1.0 and
+ktms-admin 1.0. From here on, what [API stability](README.md#api-stability) lists changes
+incompatibly only in a new major version. Upgrade from 0.1.x in one step.
+
 ### Added
 - Authentication: bearer tokens with `write` and `read` scopes, configured as SHA-256 hashes in
   `TOKENMETER_TOKENS` or `TOKENMETER_TOKENS_FILE`, several at once for rotation. Refusals are
@@ -68,7 +74,8 @@ All notable changes to light-tokenmeter are listed here. The format follows
 First release: append-only, idempotent usage events over HTTP and gRPC, daily summaries with
 filters and groupings, and usage by meta.
 
-[Unreleased]: https://github.com/ai-process/light-tokenmeter/compare/0.1.2...HEAD
+[Unreleased]: https://github.com/ai-process/light-tokenmeter/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ai-process/light-tokenmeter/compare/0.1.2...v1.0.0
 [0.1.2]: https://github.com/ai-process/light-tokenmeter/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/ai-process/light-tokenmeter/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/ai-process/light-tokenmeter/releases/tag/0.1.0
