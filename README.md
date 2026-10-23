@@ -264,7 +264,7 @@ releases fix bugs.
 Not public, and free to change in any release: log message text (other than the prefix above),
 the `internal/` Go packages, the outbox's lease and retry timings, and resource numbers.
 
-### Compatibility with KTMS and ktms-admin
+### Compatibility with Keystone. The Model Switchboard. (KTMS) and ktms-admin
 
 | light-tokenmeter | Keystone (KTMS) | ktms-admin | Authentication |
 | --- | --- | --- | --- |
