@@ -8,6 +8,11 @@ All notable changes to light-tokenmeter are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-24
+
+Tools for people and AI assistants; the service and its APIs are unchanged apart from the
+version in `/healthz`.
+
 ### Added
 - The `tokenmeter` CLI: `usage summary|top|by-meta|export` with totals in USD and windows that
   the server caps fetched in parts, `token new|hash` for `TOKENMETER_TOKENS`, `event send`,
@@ -92,7 +97,8 @@ incompatibly only in a new major version. Upgrade from 0.1.x in one step.
 First release: append-only, idempotent usage events over HTTP and gRPC, daily summaries with
 filters and groupings, and usage by meta.
 
-[Unreleased]: https://github.com/ai-process/light-tokenmeter/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/ai-process/light-tokenmeter/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/ai-process/light-tokenmeter/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/ai-process/light-tokenmeter/compare/0.1.2...v1.0.0
 [0.1.2]: https://github.com/ai-process/light-tokenmeter/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/ai-process/light-tokenmeter/compare/0.1.0...0.1.1
