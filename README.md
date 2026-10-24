@@ -77,6 +77,9 @@ Release images are published for `linux/amd64` and `linux/arm64`:
 docker pull coyl/light-tokenmeter:latest     # or pin a release, e.g. coyl/light-tokenmeter:1.0.0
 ```
 
+Tags have no `v`: `1.0.0` is one release, `1.0` follows the newest release of 1.0.x and `latest`
+the newest of all. The [changelog](CHANGELOG.md) lists what each release changed.
+
 It needs only a Postgres database:
 
 ```bash
@@ -583,24 +586,8 @@ Layout: `cmd/server` (entrypoint), `internal/server` (HTTP + gRPC), `internal/se
 (business logic), `internal/repository` (SQL), `internal/domain` (models and validation),
 `internal/database` (pool and embedded migrations).
 
-### Releasing
-
-1. Move the `[Unreleased]` entries of [`CHANGELOG.md`](CHANGELOG.md) under a new version heading
-   with today's date, in a pull request.
-2. After it is merged, tag main and push the tag:
-
-   ```bash
-   git tag v1.0.0 && git push origin v1.0.0
-   ```
-
-The [Release](.github/workflows/release.yml) workflow then runs the upgrade test from earlier
-releases and `govulncheck`, creates the GitHub Release from the changelog section, and publishes
-the signed multi-arch image `coyl/light-tokenmeter:1.0.0`; `1.0` moves to it when it is the newest
-release of 1.0.x, and `latest` when it is the newest release of all. Tags are `vX.Y.Z` only, with
-no pre-releases; push one release tag at a time. The repository needs the secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD`. Run
-the upgrade test locally (needs Docker) with `./scripts/upgrade-test.sh`.
-
-Pull requests are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Pull requests are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md). Maintainers release as
+described in [`RELEASING.md`](RELEASING.md).
 
 ## License
 
