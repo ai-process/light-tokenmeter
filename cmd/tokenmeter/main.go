@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/ai-process/light-tokenmeter/pkg/client"
 )
 
 // version is set at release time with -ldflags "-X main.version=...".
@@ -28,6 +30,7 @@ type app struct {
 	stdout, stderr io.Writer
 	t              target
 	timeout        time.Duration
+	shared         *client.Client // set while tokenmeter mcp serves
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -121,7 +124,7 @@ events. Without one the call goes out unauthenticated.
 	pf.StringVar(&a.t.tokenFile, "token-file", "", "read the token from this file instead of TOKENMETER_TOKEN")
 	pf.DurationVar(&a.timeout, "timeout", time.Minute, "time limit for each command")
 
-	root.AddCommand(a.usageCmd(), a.tokenCmd(), a.eventCmd(), a.healthCmd(), a.contextCmd(), &cobra.Command{
+	root.AddCommand(a.usageCmd(), a.tokenCmd(), a.eventCmd(), a.healthCmd(), a.mcpCmd(), a.contextCmd(), &cobra.Command{
 		Use: "version", Short: "Print the version", Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			fmt.Fprintln(a.stdout, version)

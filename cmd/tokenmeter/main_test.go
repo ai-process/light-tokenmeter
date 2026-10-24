@@ -103,7 +103,7 @@ func TestContexts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if tg.addr != "tm.example.com:443" || !tg.tls || tg.http != "https://tm.example.com:8080" {
-		t.Fatalf("resolved %+v", tg)
+		t.Fatalf("resolved %+v", &tg)
 	}
 	if tok, _ := tg.token(); tok != "tok-env" {
 		t.Fatalf("token = %q", tok)

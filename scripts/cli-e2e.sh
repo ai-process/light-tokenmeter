@@ -109,6 +109,10 @@ check() {
 	tokenmeter usage top --last 1d --by cost --dimension project | sed -n 2p | grep -q 'p2' || fail "top is not p2"
 	tokenmeter usage by-meta --key job_id --value j1 -o json | grep -q '"request_count": "2"' || fail "by-meta for m1"
 
+	echo "--- mcp over stdio"
+	TOKENMETER_E2E_BIN="$TMP/tokenmeter" go test -count=1 -tags e2e -run '^TestMCPStdio$' ./cmd/tokenmeter/ || fail "mcp disagrees with the API"
+	if TOKENMETER_TOKEN=$WRITE tokenmeter mcp </dev/null 2>/dev/null; then fail "mcp ran with a write token"; fi
+
 	code=0
 	TOKENMETER_TOKEN=wrong tokenmeter usage summary 2>/dev/null || code=$?
 	[ "$code" = 4 ] || fail "a wrong token exited $code, want 4"

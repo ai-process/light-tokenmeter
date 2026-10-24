@@ -237,6 +237,7 @@ tokenmeter token new --name ktms --scope write                    # the token, t
 tokenmeter event send --project p1 --user u1 --action check --vendor openai --model gpt-4o-mini
 tokenmeter health
 tokenmeter completion zsh > "${fpath[1]}/_tokenmeter"             # also bash and fish
+tokenmeter mcp                                                    # reports for AI assistants
 ```
 
 - Windows are `--last` (`24h`, `7d`, `4w`; 7 days by default) or `--from`/`--to` in RFC 3339 or
@@ -254,6 +255,37 @@ tokenmeter completion zsh > "${fpath[1]}/_tokenmeter"             # also bash an
   6 rejected as invalid, 7 unavailable (retry later).
 - [`pkg/client`](pkg/client) is the Go client underneath: `Record` in batches of 500, `Summary`
   with the window splitting, `ByMeta`.
+
+### MCP server for AI assistants
+
+`tokenmeter mcp` lets Claude Code, Claude Desktop, Cursor and other MCP clients answer "what did
+team X spend this week", "which actions are expensive per request" or "what did job-42 cost" from
+the data here. Every tool only reads:
+
+- `usage_summary` (the summary's filters and groupings, totals or `daily`), `top_spenders` (by cost,
+  tokens or requests, with shares), `cost_per_action` (cost and tokens per request, latency and the
+  failed share per `action_id`), `usage_by_meta` (a job tagged in `meta`), `health`;
+- amounts as exact `cost_usd` and as `cost_nanousd`, windows in UTC, and a `truncated` result marked
+  as not a total; capped windows are fetched in parts first, as in the CLI;
+- a prompt, `usage_report`.
+
+It needs a token with the `read` scope and refuses one that can also write, so an assistant's
+server never records usage. Claude Code (`.mcp.json`), Claude Desktop and Cursor take:
+
+```json
+{
+  "mcpServers": {
+    "tokenmeter": { "command": "tokenmeter", "args": ["mcp"],
+                    "env": { "TOKENMETER_ADDR": "tm.example.com:443", "TOKENMETER_TLS": "true",
+                             "TOKENMETER_CONTEXT": "prod" } }
+  }
+}
+```
+
+Together with Keystone's `ktms mcp` (its `get_spend`), an assistant can say what was spent and how
+much of a cap is left. Over the network, `tokenmeter mcp --listen 127.0.0.1:8766` serves
+streamable HTTP at `/mcp` with `Authorization: Bearer <token>` from `TOKENMETER_MCP_TOKEN` (16+
+characters); it speaks plain HTTP, so keep it on localhost or behind a TLS proxy.
 
 ## API reference
 
@@ -307,8 +339,8 @@ releases fix bugs.
 Not public, and free to change in any release: log message text (other than the prefix above),
 the `internal/` Go packages, the outbox's lease and retry timings, and resource numbers.
 
-The `tokenmeter` CLI (commands, flags, exit codes, `-o json|csv` output) and `pkg/client` are new
-in 1.1 and Experimental until 1.2: they may still change in a minor release, with a changelog
+The `tokenmeter` CLI (commands, flags, exit codes, `-o json|csv` output), its MCP tools and
+`pkg/client` are new in 1.1 and Experimental until 1.2: they may still change in a minor release, with a changelog
 note.
 
 ### Compatibility with Keystone. The Model Switchboard. (KTMS) and ktms-admin
