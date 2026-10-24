@@ -7,6 +7,7 @@ feature is a minor, a break of what is public waits for a new major.
 
 1. In a pull request, move the `[Unreleased]` entries of [`CHANGELOG.md`](CHANGELOG.md) under a
    new `## [X.Y.Z] - YYYY-MM-DD` heading and add its compare link at the bottom.
+   Set `V=` in [`SECURITY.md`](SECURITY.md#verifying-a-release) to the new tag.
 2. After it is merged, tag main and push the tag:
 
    ```bash
