@@ -15,6 +15,9 @@ All notable changes to light-tokenmeter are listed here. The format follows
   keychain, `-o json|csv`, exit codes by error class and completion for bash, zsh and fish.
   Released as archives with a signed `checksums.txt`, the `coyl/tokenmeter-cli` image and a
   Homebrew formula (published once the tap token is set).
+- `tokenmeter mcp`: a read-only MCP server for AI assistants over stdio or streamable HTTP
+  (`--listen`, bearer token) with `usage_summary`, `top_spenders`, `cost_per_action`,
+  `usage_by_meta`, `health` and a `usage_report` prompt. It refuses a token that can write.
 - `pkg/client`, a Go client for the gRPC API.
 - `/healthz` reports the service's `version`.
 

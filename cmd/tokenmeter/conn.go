@@ -10,6 +10,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ai-process/light-tokenmeter/pkg/client"
 )
@@ -29,6 +31,8 @@ type target struct {
 	envToken string // TOKENMETER_TOKEN, unless a context was asked for by name
 	warn     io.Writer
 	resolved bool
+	httpOnce sync.Once
+	hc       *http.Client
 }
 
 // resolve fills addr, tls and http from the environment and the context, on
@@ -137,11 +141,16 @@ func (t *target) httpBase() (string, error) {
 	return t.http, nil
 }
 
+// httpClient is shared: tokenmeter mcp probes health for as long as it runs.
 func (t *target) httpClient() *http.Client {
-	return &http.Client{Transport: &http.Transport{
-		Proxy:           http.ProxyFromEnvironment,
-		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
-	}}
+	t.httpOnce.Do(func() {
+		t.hc = &http.Client{Transport: &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+			IdleConnTimeout: 90 * time.Second,
+		}}
+	})
+	return t.hc
 }
 
 func loopback(addr string) bool {

@@ -121,7 +121,7 @@ events. Without one the call goes out unauthenticated.
 	pf.StringVar(&a.t.tokenFile, "token-file", "", "read the token from this file instead of TOKENMETER_TOKEN")
 	pf.DurationVar(&a.timeout, "timeout", time.Minute, "time limit for each command")
 
-	root.AddCommand(a.usageCmd(), a.tokenCmd(), a.eventCmd(), a.healthCmd(), a.contextCmd(), &cobra.Command{
+	root.AddCommand(a.usageCmd(), a.tokenCmd(), a.eventCmd(), a.healthCmd(), a.mcpCmd(), a.contextCmd(), &cobra.Command{
 		Use: "version", Short: "Print the version", Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			fmt.Fprintln(a.stdout, version)
