@@ -82,10 +82,13 @@ func (s *HTTPServer) Shutdown(ctx context.Context) error {
 }
 
 // Health check handlers
+// Version is the build's release version, reported by /healthz.
+var Version = "dev"
+
 func (s *HTTPServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": Version})
 }
 
 func (s *HTTPServer) handleReadyz(w http.ResponseWriter, r *http.Request) {

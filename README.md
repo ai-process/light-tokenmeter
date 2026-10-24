@@ -26,6 +26,7 @@ who is worthy.
 - [Installation](#installation)
 - [Sending events](#sending-events)
 - [Finding the greedy and the worthy](#finding-the-greedy-and-the-worthy)
+- [Command-line tool](#command-line-tool)
 - [API reference](#api-reference)
 - [API stability](#api-stability)
 - [Configuration](#configuration)
@@ -214,6 +215,45 @@ grpcurl -plaintext -d '{"meta_key":"job_id","meta_value":"job-42","group_by_meta
 gRPC reflection is on, so `grpcurl` needs no `.proto` files (with auth on, pass a token with
 `-H 'authorization: Bearer …'`).
 
+## Command-line tool
+
+`tokenmeter` reads the reports without hand-built query strings or dividing by 1e9, makes tokens
+without `openssl`, and sends a test event. It talks gRPC to `:9090`; `health` uses HTTP `:8080`.
+
+```bash
+# a release archive (darwin/linux, amd64/arm64, signed checksums), or:
+go install github.com/ai-process/light-tokenmeter/cmd/tokenmeter@latest
+docker run --rm -e TOKENMETER_ADDR -e TOKENMETER_TOKEN coyl/tokenmeter-cli:latest usage summary
+```
+
+```bash
+export TOKENMETER_ADDR=localhost:9090 TOKENMETER_TOKEN=…        # a read token for reports
+tokenmeter usage summary --last 7d --group-by project            # totals in USD; --daily per day
+tokenmeter usage summary --from 2026-09-01 --to 2026-10-01 --model gpt-4o --group-by user
+tokenmeter usage top --by cost --dimension action --limit 5
+tokenmeter usage by-meta --key job_id --value job-42 --group-by task_id
+tokenmeter usage export --last 30d --format csv --out usage.csv   # daily rows, every dimension
+tokenmeter token new --name ktms --scope write                    # the token, then its entry
+tokenmeter event send --project p1 --user u1 --action check --vendor openai --model gpt-4o-mini
+tokenmeter health
+tokenmeter completion zsh > "${fpath[1]}/_tokenmeter"             # also bash and fish
+```
+
+- Windows are `--last` (`24h`, `7d`, `4w`; 7 days by default) or `--from`/`--to` in RFC 3339 or
+  `YYYY-MM-DD`, all UTC. A window the server caps at 10,000 rows (`truncated`) is fetched in
+  smaller parts and added up, so totals are complete; only an hour that is still capped is
+  reported as incomplete.
+- `-o json` keeps the API's fields (`cost_nanousd` as a string), `-o csv` gives exact dollars.
+- Contexts work as in `ktms`: `tokenmeter context set prod --addr tm.example.com:443 --tls
+  --token keychain`, then `tokenmeter context store-token prod` reads the token without echo.
+  They live in `~/.config/tokenmeter/config.yaml` (`TOKENMETER_CONFIG`); a token source is
+  `env:VAR`, `file:PATH` or `keychain`. Flags win over `TOKENMETER_ADDR`, `TOKENMETER_TLS`,
+  `TOKENMETER_HTTP` and `TOKENMETER_TOKEN`, which win over the context.
+- Exit codes: 0 done, 1 failed, 2 bad usage, 4 not authenticated or not allowed, 5 not found,
+  6 rejected as invalid, 7 unavailable (retry later).
+- [`pkg/client`](pkg/client) is the Go client underneath: `Record` in batches of 500, `Summary`
+  with the window splitting, `ByMeta`.
+
 ## API reference
 
 ### HTTP (`:8080`)
@@ -223,7 +263,7 @@ gRPC reflection is on, so `grpcurl` needs no `.proto` files (with auth on, pass 
 | `POST` | `/v1/usage/events` | Record one event. |
 | `POST` | `/v1/usage/events:batch` | Record up to 500 events. |
 | `GET` | `/v1/usage/summary` | Aggregated usage, see above. |
-| `GET` | `/healthz` | Liveness. |
+| `GET` | `/healthz` | Liveness, with the service's `version`. |
 | `GET` | `/readyz` | Readiness (database ping). |
 
 Errors from `/v1/usage/*` are JSON `{"error": "<message>", "code": "<code>", "details": "<optional>"}`,
@@ -265,6 +305,10 @@ releases fix bugs.
 
 Not public, and free to change in any release: log message text (other than the prefix above),
 the `internal/` Go packages, the outbox's lease and retry timings, and resource numbers.
+
+The `tokenmeter` CLI (commands, flags, exit codes, `-o json|csv` output) and `pkg/client` are new
+in 1.1 and Experimental until 1.2: they may still change in a minor release, with a changelog
+note.
 
 ### Compatibility with Keystone. The Model Switchboard. (KTMS) and ktms-admin
 
@@ -345,6 +389,8 @@ The service stores only SHA-256 hashes. Each entry is `name:scope[+scope]:sha256
 are separated by commas or newlines, and in a file `#` starts a comment:
 
 ```bash
+tokenmeter token new --name ktms --scope write   # prints the token, then ktms:write:<hash>
+# or by hand:
 TOKEN=$(openssl rand -hex 32)                  # give this to the client
 printf %s "$TOKEN" | openssl dgst -sha256 -r | cut -d' ' -f1 # put this in the config
 TOKENMETER_TOKENS="ktms:write:<hash>,console:read:<hash>"

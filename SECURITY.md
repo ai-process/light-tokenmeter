@@ -25,6 +25,16 @@ docker buildx imagetools inspect coyl/light-tokenmeter:${V#v} --format '{{ json 
 docker buildx imagetools inspect coyl/light-tokenmeter:${V#v} --format '{{ json .Provenance }}'
 ```
 
+The CLI image `coyl/tokenmeter-cli` is signed the same way. The CLI's archives on the GitHub
+release (`checksums.txt` is signed; each archive has an `.sbom.json`), from 1.1.0 on:
+
+```bash
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity "https://github.com/ai-process/light-tokenmeter/.github/workflows/release.yml@refs/tags/$V" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum --ignore-missing -c checksums.txt
+```
+
 Every pull request and every release runs [`govulncheck`](https://go.dev/doc/security/vuln/): a
 known vulnerability that light-tokenmeter's code can reach fails the build, and a release does not
 go out.

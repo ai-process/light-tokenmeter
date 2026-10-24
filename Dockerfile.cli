@@ -1,0 +1,17 @@
+FROM golang:1.27.3-alpine3.23 AS builder
+RUN apk add --no-cache 'ca-certificates>=20261020-r0'
+ARG TARGETOS=linux
+ARG TARGETARCH
+ARG VERSION=dev
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/tokenmeter ./cmd/tokenmeter
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /out/tokenmeter /tokenmeter
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+USER 65532:65532
+ENTRYPOINT ["/tokenmeter"]

@@ -60,6 +60,7 @@ func main() {
 
 	// Before migrations, which can be long: a scrape must not see the service down.
 	metrics.BuildInfo.WithLabelValues(version).Set(1)
+	server.Version = version
 	if cfg.ClickHouseEnabled {
 		metrics.ClickHouseEnabled.Set(1)
 	}

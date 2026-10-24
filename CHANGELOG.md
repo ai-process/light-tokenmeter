@@ -8,6 +8,16 @@ All notable changes to light-tokenmeter are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- The `tokenmeter` CLI: `usage summary|top|by-meta|export` with totals in USD and windows that
+  the server caps fetched in parts, `token new|hash` for `TOKENMETER_TOKENS`, `event send`,
+  `health`, contexts with the token from an environment variable, a 0600 file or the system
+  keychain, `-o json|csv`, exit codes by error class and completion for bash, zsh and fish.
+  Released as archives with a signed `checksums.txt`, the `coyl/tokenmeter-cli` image and a
+  Homebrew formula (published once the tap token is set).
+- `pkg/client`, a Go client for the gRPC API.
+- `/healthz` reports the service's `version`.
+
 ## [1.0.0] - 2026-10-23
 
 The first stable release, together with Keystone. The Model Switchboard. (KTMS) 1.0 and
