@@ -27,6 +27,9 @@ const exitCodesHelp = `Exit codes: 0 done, 1 failed, 2 bad usage,
 
 type usageError struct{ error }
 
+// scopeError is a token without the scopes a command needs, or with more.
+type scopeError struct{ error }
+
 func exitCode(err error) int {
 	if err == nil {
 		return exitOK
@@ -34,6 +37,10 @@ func exitCode(err error) int {
 	var u usageError
 	if errors.As(err, &u) {
 		return exitUsage
+	}
+	var se scopeError
+	if errors.As(err, &se) {
+		return exitAuth
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) || errors.Is(err, context.DeadlineExceeded) {

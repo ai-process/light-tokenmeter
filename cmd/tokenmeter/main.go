@@ -13,8 +13,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-
-	"github.com/ai-process/light-tokenmeter/pkg/client"
 )
 
 // version is set at release time with -ldflags "-X main.version=...".
@@ -30,7 +28,6 @@ type app struct {
 	stdout, stderr io.Writer
 	t              target
 	timeout        time.Duration
-	shared         *client.Client // set while tokenmeter mcp serves
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {

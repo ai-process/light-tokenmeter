@@ -200,12 +200,7 @@ func (a *app) summaryCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rows = client.Merge(rows, daily)
-			if daily {
-				sort.SliceStable(rows, func(i, j int) bool { return rows[i].GetBucket().GetSeconds() < rows[j].GetBucket().GetSeconds() })
-			} else {
-				sort.SliceStable(rows, func(i, j int) bool { return rows[i].GetCostNanousd() > rows[j].GetCostNanousd() })
-			}
+			rows = sortRows(client.Merge(rows, daily), daily)
 			if p.json() {
 				return p.data(map[string]any{"from": req.GetFrom(), "to": req.GetTo(), "rows": messages(rows), "truncated": truncated})
 			}
@@ -229,7 +224,7 @@ func (a *app) summaryCmd() *cobra.Command {
 					line = append(line, dimValue(r, d))
 				}
 				out = append(out, append(line, a.figures(p, r)...))
-				total = client.Merge([]*usagev1.UsageSummaryRow{total, stripped(r)}, false)[0]
+				addRow(total, r)
 			}
 			if p.format == "table" && len(rows) > 1 {
 				line := make([]string, len(header)-7)
@@ -249,11 +244,55 @@ func (a *app) summaryCmd() *cobra.Command {
 	return cmd
 }
 
-// stripped is a row's figures without its dimensions, for totals.
-func stripped(r *usagev1.UsageSummaryRow) *usagev1.UsageSummaryRow {
-	return &usagev1.UsageSummaryRow{TokensInput: r.GetTokensInput(), TokensOutput: r.GetTokensOutput(), TokensTotal: r.GetTokensTotal(),
-		RequestCount: r.GetRequestCount(), SumDurationMs: r.GetSumDurationMs(), CostNanousd: r.GetCostNanousd(),
-		CacheReadTokens: r.GetCacheReadTokens(), CacheWriteTokens: r.GetCacheWriteTokens()}
+// addRow adds r's figures to dst, whatever their dimensions, for totals.
+func addRow(dst, r *usagev1.UsageSummaryRow) {
+	dst.TokensInput += r.GetTokensInput()
+	dst.TokensOutput += r.GetTokensOutput()
+	dst.TokensTotal += r.GetTokensTotal()
+	dst.RequestCount += r.GetRequestCount()
+	dst.SumDurationMs += r.GetSumDurationMs()
+	dst.CostNanousd += r.GetCostNanousd()
+	dst.CacheReadTokens += r.GetCacheReadTokens()
+	dst.CacheWriteTokens += r.GetCacheWriteTokens()
+}
+
+// sortRows puts days in order, or totals most expensive first. The CLI and
+// the MCP tools share it, so both answer in the same order.
+func sortRows(rows []*usagev1.UsageSummaryRow, daily bool) []*usagev1.UsageSummaryRow {
+	if daily {
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].GetBucket().GetSeconds() < rows[j].GetBucket().GetSeconds() })
+	} else {
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].GetCostNanousd() > rows[j].GetCostNanousd() })
+	}
+	return rows
+}
+
+// measures are what usage top and top_spenders rank by.
+var measures = map[string]func(*usagev1.UsageSummaryRow) int64{
+	"cost":     (*usagev1.UsageSummaryRow).GetCostNanousd,
+	"tokens":   (*usagev1.UsageSummaryRow).GetTokensTotal,
+	"requests": (*usagev1.UsageSummaryRow).GetRequestCount,
+}
+
+// rank orders rows by measure and keeps the first limit (0 keeps all); a
+// share is of every row's sum, not only of the rows kept.
+func rank(rows []*usagev1.UsageSummaryRow, measure func(*usagev1.UsageSummaryRow) int64, limit int) ([]*usagev1.UsageSummaryRow, []string) {
+	var sum int64
+	for _, r := range rows {
+		sum += measure(r)
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return measure(rows[i]) > measure(rows[j]) })
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	shares := make([]string, len(rows))
+	for i, r := range rows {
+		shares[i] = "0%"
+		if sum > 0 {
+			shares[i] = fmt.Sprintf("%.1f%%", 100*float64(measure(r))/float64(sum))
+		}
+	}
+	return rows, shares
 }
 
 func (a *app) figures(p *printer, r *usagev1.UsageSummaryRow) []string {
@@ -280,11 +319,7 @@ func (a *app) topCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			measure := map[string]func(*usagev1.UsageSummaryRow) int64{
-				"cost":     (*usagev1.UsageSummaryRow).GetCostNanousd,
-				"tokens":   (*usagev1.UsageSummaryRow).GetTokensTotal,
-				"requests": (*usagev1.UsageSummaryRow).GetRequestCount,
-			}[by]
+			measure := measures[by]
 			if measure == nil {
 				return usageError{fmt.Errorf("--by %q: want cost, tokens or requests", by)}
 			}
@@ -296,26 +331,14 @@ func (a *app) topCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rows = client.Merge(rows, false)
-			var sum int64
-			for _, r := range rows {
-				sum += measure(r)
-			}
-			sort.SliceStable(rows, func(i, j int) bool { return measure(rows[i]) > measure(rows[j]) })
-			if limit > 0 && len(rows) > limit {
-				rows = rows[:limit]
-			}
+			rows, shares := rank(client.Merge(rows, false), measure, limit)
 			if p.json() {
 				return p.data(map[string]any{"from": req.GetFrom(), "to": req.GetTo(), "by": by, "dimension": dim, "rows": messages(rows), "truncated": truncated})
 			}
 			var out [][]string
 			for i, r := range rows {
-				share := ""
-				if sum > 0 {
-					share = fmt.Sprintf("%.1f%%", 100*float64(measure(r))/float64(sum))
-				}
 				out = append(out, []string{strconv.Itoa(i + 1), dimValue(r, dim), strconv.FormatInt(r.GetRequestCount(), 10),
-					strconv.FormatInt(r.GetTokensTotal(), 10), p.usd(r.GetCostNanousd()), share})
+					strconv.FormatInt(r.GetTokensTotal(), 10), p.usd(r.GetCostNanousd()), shares[i]})
 			}
 			return p.rows([]string{"RANK", strings.ToUpper(dim), "REQUESTS", "TOKENS", "COST USD", "SHARE OF " + strings.ToUpper(by)}, out)
 		},

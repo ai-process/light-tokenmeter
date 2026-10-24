@@ -1,12 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -45,13 +45,26 @@ Protocol: on stdin and stdout by default, or as streamable HTTP at
 http://HOST:PORT/mcp with --listen. Every tool only reads.
 
 The token needs the read scope, and one that can also write events is refused,
-so the assistant's server cannot record usage.
+so the assistant's server cannot record usage. (The check sends an empty batch,
+which the service refuses after looking at the token's scopes: a service log
+shows it as a denied write.)
 
 Over HTTP every request needs "Authorization: Bearer <token>", the token read from
 TOKENMETER_MCP_TOKEN or --mcp-token-file. The server speaks plain HTTP: keep it
 on localhost, or put a TLS proxy in front of it.`,
 		Args: cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var token string
+			if listen == "" {
+				if cmd.Flags().Changed("mcp-token-file") {
+					return usageError{errors.New("--mcp-token-file is for --listen; stdio needs no token")}
+				}
+			} else {
+				var err error
+				if token, err = mcpToken(tokenFile, "TOKENMETER_MCP_TOKEN"); err != nil {
+					return err
+				}
+			}
 			c, err := a.t.client()
 			if err != nil {
 				return err
@@ -60,28 +73,37 @@ on localhost, or put a TLS proxy in front of it.`,
 			if err := a.checkReadOnly(c); err != nil {
 				return err
 			}
-			a.shared = c
-			srv := a.mcpServer()
+			srv := a.mcpServer(c)
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
-			if listen == "" {
-				return srv.Run(ctx, &mcp.StdioTransport{})
+			if listen != "" {
+				return serveMCP(ctx, a.stderr, srv, listen, token)
 			}
-			token := os.Getenv("TOKENMETER_MCP_TOKEN")
-			if tokenFile != "" {
-				if token, err = readKeyFile(tokenFile); err != nil {
-					return err
-				}
+			// A signal is how hosts stop a stdio server: a clean exit, not an error.
+			if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil && ctx.Err() == nil {
+				return err
 			}
-			if len(token) < 16 {
-				return usageError{errors.New("--listen needs a bearer token of 16 characters or more in TOKENMETER_MCP_TOKEN or --mcp-token-file")}
-			}
-			return a.serveMCP(ctx, srv, listen, token)
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&listen, "listen", "", "serve streamable HTTP on this address instead of stdio, e.g. 127.0.0.1:8766")
 	cmd.Flags().StringVar(&tokenFile, "mcp-token-file", "", "read the HTTP bearer token from this file instead of TOKENMETER_MCP_TOKEN")
 	return cmd
+}
+
+// mcpToken is the bearer token HTTP clients of the MCP server must send.
+func mcpToken(file, env string) (string, error) {
+	token := os.Getenv(env)
+	if file != "" {
+		var err error
+		if token, err = readKeyFile(file); err != nil {
+			return "", err
+		}
+	}
+	if len(token) < 16 {
+		return "", usageError{fmt.Errorf("--listen needs a bearer token of 16 characters or more in %s or --mcp-token-file", env)}
+	}
+	return token, nil
 }
 
 // checkReadOnly refuses a token that can write events. An empty batch is
@@ -107,22 +129,22 @@ func (a *app) checkReadOnly(c *client.Client) error {
 	switch status.Code(err) {
 	case codes.PermissionDenied:
 		return nil
-	case codes.InvalidArgument:
-		return usageError{errors.New("this token may also write events (or the service runs without auth): give tokenmeter mcp a token with the read scope only")}
+	case codes.InvalidArgument, codes.OK:
+		return scopeError{errors.New("this token may also write events (or the service runs without auth): give tokenmeter mcp a token with the read scope only")}
 	}
 	return fmt.Errorf("checking the token's scopes: %w", err)
 }
 
-// serveMCP serves streamable HTTP until ctx ends.
-func (a *app) serveMCP(ctx context.Context, srv *mcp.Server, listen, token string) error {
+// serveMCP serves streamable HTTP until ctx ends, then lets running calls
+// finish before it returns and the caller closes what they use.
+func serveMCP(ctx context.Context, warn io.Writer, srv *mcp.Server, listen, token string) error {
 	if !loopback(listen) {
-		fmt.Fprintf(a.stderr, "tokenmeter: warning: MCP on %s is plain HTTP; put a TLS proxy in front of it\n", listen)
+		fmt.Fprintf(warn, "tokenmeter: warning: MCP on %s is plain HTTP; put a TLS proxy in front of it\n", listen)
 	}
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{SessionTimeout: 30 * time.Minute})
-	want := []byte("Bearer " + token)
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", http.NewCrossOriginProtection().Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
+		if !bearerOK(r.Header.Get("Authorization"), token) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -134,17 +156,27 @@ func (a *app) serveMCP(ctx context.Context, srv *mcp.Server, listen, token strin
 		return err
 	}
 	hs := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	fmt.Fprintf(a.stderr, "tokenmeter: MCP on http://%s/mcp\n", lis.Addr())
+	fmt.Fprintf(warn, "tokenmeter: MCP on http://%s/mcp\n", lis.Addr())
+	drained := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = hs.Shutdown(sctx)
+		drained <- hs.Shutdown(sctx)
 	}()
 	if err := hs.Serve(lis); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
-	return nil
+	return <-drained
+}
+
+// bearerOK checks an Authorization header; the scheme is case-insensitive.
+func bearerOK(header, token string) bool {
+	scheme, got, ok := strings.Cut(strings.TrimSpace(header), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(got)), []byte(token)) == 1
 }
 
 // window is the time range and filters every usage tool takes.
@@ -210,7 +242,7 @@ type report struct {
 }
 
 // summary fetches and merges rows for the tools.
-func (a *app) summary(ctx context.Context, w window, groups []string, daily bool) (*usagev1.GetUsageSummaryRequest, []*usagev1.UsageSummaryRow, bool, error) {
+func (a *app) summary(ctx context.Context, c *client.Client, w window, groups []string, daily bool) (*usagev1.GetUsageSummaryRequest, []*usagev1.UsageSummaryRow, bool, error) {
 	q := w.query()
 	req, err := q.request(groups)
 	if err != nil {
@@ -218,31 +250,38 @@ func (a *app) summary(ctx context.Context, w window, groups []string, daily bool
 	}
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
-	rows, truncated, err := a.shared.Summary(ctx, req)
+	rows, truncated, err := c.Summary(ctx, req)
 	if err != nil {
 		return nil, nil, false, errors.New(errText(err))
 	}
 	return req, client.Merge(rows, daily), truncated, nil
 }
 
+// header is what every report says about its window and completeness.
+func header(req *usagev1.GetUsageSummaryRequest, rows int, truncated bool) (from, to, note string) {
+	from, to = req.GetFrom().AsTime().Format(time.RFC3339), req.GetTo().AsTime().Format(time.RFC3339)
+	switch {
+	case truncated:
+		note = "truncated: even an hour of this query exceeds the server's row cap, so these are not totals; narrow the filters"
+	case rows == 0:
+		note = "no traffic in this window"
+	}
+	return from, to, note
+}
+
 func newReport(req *usagev1.GetUsageSummaryRequest, rows []*usagev1.UsageSummaryRow, truncated, daily bool) report {
-	rep := report{From: req.GetFrom().AsTime().Format(time.RFC3339), To: req.GetTo().AsTime().Format(time.RFC3339), Rows: []usageRow{}, Truncated: truncated}
+	rep := report{Rows: []usageRow{}, Truncated: truncated}
+	rep.From, rep.To, rep.Note = header(req, len(rows), truncated)
 	total := &usagev1.UsageSummaryRow{}
 	for _, r := range rows {
 		rep.Rows = append(rep.Rows, toRow(r, daily))
-		total = client.Merge([]*usagev1.UsageSummaryRow{total, stripped(r)}, false)[0]
+		addRow(total, r)
 	}
 	rep.Total = toRow(total, false)
-	if truncated {
-		rep.Note = "truncated: even an hour of this query exceeds the server's row cap, so these are not totals; narrow the filters"
-	}
-	if len(rows) == 0 {
-		rep.Note = "no traffic in this window"
-	}
 	return rep
 }
 
-func (a *app) mcpServer() *mcp.Server {
+func (a *app) mcpServer(c *client.Client) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "tokenmeter", Title: "light-tokenmeter", Version: version},
 		&mcp.ServerOptions{Instructions: mcpInstructions})
 	read := func(name, title, desc string) *mcp.Tool {
@@ -258,71 +297,57 @@ func (a *app) mcpServer() *mcp.Server {
 	mcp.AddTool(srv, read("usage_summary", "Usage summary",
 		"Requests, tokens and cost over a window, by the dimensions you group by, with a total. Without group_by it is the window's total."+untrusted),
 		func(ctx context.Context, _ *mcp.CallToolRequest, in summaryIn) (*mcp.CallToolResult, any, error) {
-			req, rows, truncated, err := a.summary(ctx, in.window, in.GroupBy, in.Daily)
+			req, rows, truncated, err := a.summary(ctx, c, in.window, in.GroupBy, in.Daily)
 			if err != nil {
 				return nil, nil, err
 			}
-			if in.Daily {
-				sort.SliceStable(rows, func(i, j int) bool { return rows[i].GetBucket().GetSeconds() < rows[j].GetBucket().GetSeconds() })
-			} else {
-				sort.SliceStable(rows, func(i, j int) bool { return rows[i].GetCostNanousd() > rows[j].GetCostNanousd() })
-			}
-			return jsonResult(newReport(req, rows, truncated, in.Daily))
+			return jsonResult(newReport(req, sortRows(rows, in.Daily), truncated, in.Daily))
 		})
 
 	type topIn struct {
 		window
 		By        string `json:"by,omitempty" jsonschema:"cost (default), tokens or requests"`
 		Dimension string `json:"dimension,omitempty" jsonschema:"project (default), user, vendor, model, action or status"`
-		Limit     int    `json:"limit,omitempty" jsonschema:"rows to return, default 10"`
+		Limit     *int   `json:"limit,omitempty" jsonschema:"rows to return: 10 when left out, 0 for all"`
 	}
 	mcp.AddTool(srv, read("top_spenders", "Top spenders",
-		"Who or what used the most over a window: projects, users, models or actions ranked by cost, tokens or requests, with each one's share."+untrusted),
+		"Who or what used the most over a window: projects, users, models or actions ranked by cost, tokens or requests, with each one's share of the whole."+untrusted),
 		func(ctx context.Context, _ *mcp.CallToolRequest, in topIn) (*mcp.CallToolResult, any, error) {
-			by, dim, limit := firstNonEmpty(in.By, "cost"), firstNonEmpty(in.Dimension, "project"), in.Limit
-			if limit <= 0 {
-				limit = 10
+			by, dim, limit := firstNonEmpty(in.By, "cost"), firstNonEmpty(in.Dimension, "project"), 10
+			if in.Limit != nil {
+				limit = *in.Limit
 			}
-			measure := map[string]func(*usagev1.UsageSummaryRow) int64{
-				"cost": (*usagev1.UsageSummaryRow).GetCostNanousd, "tokens": (*usagev1.UsageSummaryRow).GetTokensTotal,
-				"requests": (*usagev1.UsageSummaryRow).GetRequestCount,
-			}[by]
+			measure := measures[by]
 			if measure == nil {
 				return nil, nil, fmt.Errorf("by %q: want cost, tokens or requests", by)
 			}
-			req, rows, truncated, err := a.summary(ctx, in.window, []string{dim}, false)
+			req, rows, truncated, err := a.summary(ctx, c, in.window, []string{dim}, false)
 			if err != nil {
 				return nil, nil, err
 			}
-			var sum int64
+			total := &usagev1.UsageSummaryRow{}
 			for _, r := range rows {
-				sum += measure(r)
+				addRow(total, r)
 			}
-			sort.SliceStable(rows, func(i, j int) bool { return measure(rows[i]) > measure(rows[j]) })
-			rep := newReport(req, rows, truncated, false)
+			all := len(rows)
+			rows, shares := rank(rows, measure, limit)
 			type ranked struct {
 				usageRow
 				Share string `json:"share"`
 			}
-			out := []ranked{}
+			out := make([]ranked, len(rows))
 			for i, r := range rows {
-				if i == limit {
-					break
-				}
-				share := "0%"
-				if sum > 0 {
-					share = fmt.Sprintf("%.1f%%", 100*float64(measure(r))/float64(sum))
-				}
-				out = append(out, ranked{rep.Rows[i], share})
+				out[i] = ranked{toRow(r, false), shares[i]}
 			}
-			return jsonResult(map[string]any{"from": rep.From, "to": rep.To, "by": by, "dimension": dim, "rows": out,
-				"total": rep.Total, "truncated": truncated, "note": rep.Note})
+			from, to, note := header(req, all, truncated)
+			return jsonResult(map[string]any{"from": from, "to": to, "by": by, "dimension": dim, "rows": out, "of": all,
+				"total": toRow(total, false), "truncated": truncated, "note": note})
 		})
 
 	mcp.AddTool(srv, read("cost_per_action", "Cost per action",
 		"Per action_id over a window: requests, cost, cost and tokens per request, average latency and the share of calls that failed (status other than success). Finds bloated prompts and paying for failures."+untrusted),
 		func(ctx context.Context, _ *mcp.CallToolRequest, in window) (*mcp.CallToolResult, any, error) {
-			req, rows, truncated, err := a.summary(ctx, in, []string{"action", "status"}, false)
+			req, rows, truncated, err := a.summary(ctx, c, in, []string{"action", "status"}, false)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -338,9 +363,9 @@ func (a *app) mcpServer() *mcp.Server {
 					by[r.GetActionId()] = x
 					order = append(order, r.GetActionId())
 				}
-				x.all = client.Merge([]*usagev1.UsageSummaryRow{x.all, stripped(r)}, false)[0]
+				addRow(x.all, r)
 				if r.GetStatus() != usagev1.Status_STATUS_SUCCESS {
-					x.failed = client.Merge([]*usagev1.UsageSummaryRow{x.failed, stripped(r)}, false)[0]
+					addRow(x.failed, r)
 				}
 			}
 			sort.SliceStable(order, func(i, j int) bool { return by[order[i]].all.GetCostNanousd() > by[order[j]].all.GetCostNanousd() })
@@ -361,8 +386,8 @@ func (a *app) mcpServer() *mcp.Server {
 				}
 				out = append(out, row)
 			}
-			rep := newReport(req, rows, truncated, false)
-			return jsonResult(map[string]any{"from": rep.From, "to": rep.To, "actions": out, "truncated": truncated, "note": rep.Note})
+			from, to, note := header(req, len(rows), truncated)
+			return jsonResult(map[string]any{"from": from, "to": to, "actions": out, "truncated": truncated, "note": note})
 		})
 
 	mcp.AddTool(srv, read("usage_by_meta", "Usage by meta",
@@ -375,7 +400,7 @@ func (a *app) mcpServer() *mcp.Server {
 		}) (*mcp.CallToolResult, any, error) {
 			ctx, cancel := context.WithTimeout(ctx, a.timeout)
 			defer cancel()
-			res, err := a.shared.ByMeta(ctx, &usagev1.GetUsageByMetaRequest{MetaKey: in.Key, MetaValue: in.Value, GroupByMetaKey: in.GroupBy, ProjectId: in.Project})
+			res, err := c.ByMeta(ctx, &usagev1.GetUsageByMetaRequest{MetaKey: in.Key, MetaValue: in.Value, GroupByMetaKey: in.GroupBy, ProjectId: in.Project})
 			if err != nil {
 				return nil, nil, errors.New(errText(err))
 			}
@@ -441,15 +466,11 @@ Data model: https://github.com/ai-process/light-tokenmeter/blob/main/README.md#f
 }
 
 func jsonResult(v any) (*mcp.CallToolResult, any, error) {
-	b, err := json.Marshal(v)
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return nil, nil, err
 	}
-	var out bytes.Buffer
-	if err := json.Indent(&out, b, "", "  "); err != nil {
-		return nil, nil, err
-	}
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: out.String()}}}, nil, nil
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(b)}}}, nil, nil
 }
 
 func ptr[T any](v T) *T { return &v }

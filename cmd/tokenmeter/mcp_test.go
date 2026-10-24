@@ -15,29 +15,29 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	usagev1 "github.com/ai-process/light-tokenmeter/gen/usage/v1"
+	"github.com/ai-process/light-tokenmeter/pkg/client"
 )
 
 // mcpApp is an app wired as tokenmeter mcp wires itself, without serving.
-func mcpApp(t *testing.T) (*app, error) {
+func mcpApp(t *testing.T) (*app, *client.Client, error) {
 	t.Helper()
 	a := &app{stdin: strings.NewReader(""), stdout: io.Discard, stderr: io.Discard, timeout: 30 * time.Second}
 	a.t.warn = io.Discard
 	c, err := a.t.client()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	t.Cleanup(func() { _ = c.Close() })
 	if err := a.checkReadOnly(c); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	a.shared = c
-	return a, nil
+	return a, c, nil
 }
 
-func mcpSession(t *testing.T, a *app) *mcp.ClientSession {
+func mcpSession(t *testing.T, a *app, c *client.Client) *mcp.ClientSession {
 	t.Helper()
 	st, ct := mcp.NewInMemoryTransports()
-	go func() { _ = a.mcpServer().Run(context.Background(), st) }()
+	go func() { _ = a.mcpServer(c).Run(context.Background(), st) }()
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(context.Background(), ct, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -87,16 +87,16 @@ func TestMCPAgainstTheService(t *testing.T) {
 	// Tokens that can write are refused; so is one that cannot read.
 	for _, s := range []string{"write", "write,read"} {
 		t.Setenv("TOKENMETER_TOKEN", tokens[s][0])
-		if _, err := mcpApp(t); err == nil {
-			t.Fatalf("a %s token was accepted", s)
+		if _, _, err := mcpApp(t); exitCode(err) != exitAuth {
+			t.Fatalf("a %s token: %v (exit %d), want refused with exit %d", s, err, exitCode(err), exitAuth)
 		}
 	}
 	t.Setenv("TOKENMETER_TOKEN", tokens["read"][0])
-	a, err := mcpApp(t)
+	a, c, err := mcpApp(t)
 	if err != nil {
 		t.Fatalf("a read token was refused: %v", err)
 	}
-	cs := mcpSession(t, a)
+	cs := mcpSession(t, a, c)
 	tl, _ := cs.ListTools(context.Background(), nil)
 	var names []string
 	for _, x := range tl.Tools {
@@ -124,7 +124,7 @@ func TestMCPAgainstTheService(t *testing.T) {
 	}
 	tool(t, cs, "usage_summary", map[string]any{"last": "1d", "group_by": []string{"project"}}, &rep)
 	now := time.Now().UTC()
-	api, _, err := a.shared.Summary(context.Background(), &usagev1.GetUsageSummaryRequest{
+	api, _, err := c.Summary(context.Background(), &usagev1.GetUsageSummaryRequest{
 		From: tsOf(now.Add(-24 * time.Hour)), To: tsOf(now.Add(time.Minute)), GroupByProjectId: true})
 	if err != nil {
 		t.Fatal(err)
@@ -148,9 +148,13 @@ func TestMCPAgainstTheService(t *testing.T) {
 			Share   string `json:"share"`
 		} `json:"rows"`
 	}
-	tool(t, cs, "top_spenders", map[string]any{"last": "1d"}, &top)
-	if len(top.Rows) != 2 || top.Rows[0].Project != "p2" || top.Rows[0].Share != "94.3%" {
+	tool(t, cs, "top_spenders", map[string]any{"last": "1d", "limit": 1}, &top)
+	if len(top.Rows) != 1 || top.Rows[0].Project != "p2" || top.Rows[0].Share != "94.3%" {
 		t.Fatalf("top_spenders = %+v", top)
+	}
+	tool(t, cs, "top_spenders", map[string]any{"last": "1d", "limit": 0}, &top)
+	if len(top.Rows) != 2 {
+		t.Fatalf("top_spenders limit 0 = %+v", top)
 	}
 
 	var actions struct {
@@ -209,7 +213,7 @@ func TestMCPOverHTTP(t *testing.T) {
 	t.Setenv("TOKENMETER_ADDR", addr)
 	t.Setenv("TOKENMETER_HTTP", base)
 	t.Setenv("TOKENMETER_TOKEN", r[0])
-	a, err := mcpApp(t)
+	a, c, err := mcpApp(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +223,7 @@ func TestMCPOverHTTP(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	token := "0123456789abcdef-test"
-	go func() { _ = a.serveMCP(ctx, a.mcpServer(), listen, token) }()
+	go func() { _ = serveMCP(ctx, io.Discard, a.mcpServer(c), listen, token) }()
 	for i := 0; i < 100; i++ {
 		if c, err := net.Dial("tcp", listen); err == nil {
 			_ = c.Close()
@@ -232,8 +236,9 @@ func TestMCPOverHTTP(t *testing.T) {
 		t.Fatalf("no token: %v", err)
 	}
 	res.Body.Close()
+	// The scheme is case-insensitive.
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint: "http://" + listen + "/mcp", HTTPClient: &http.Client{Transport: bearerRT{token}}, MaxRetries: -1, DisableStandaloneSSE: true}, nil)
+		Endpoint: "http://" + listen + "/mcp", HTTPClient: &http.Client{Transport: bearerRT{"bearer " + token}}, MaxRetries: -1, DisableStandaloneSSE: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,8 +256,25 @@ type bearerRT struct{ token string }
 
 func (b bearerRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
-	r.Header.Set("Authorization", "Bearer "+b.token)
+	r.Header.Set("Authorization", b.token)
 	return http.DefaultTransport.RoundTrip(r)
 }
 
 func tsOf(t time.Time) *timestamppb.Timestamp { return timestamppb.New(t) }
+
+func TestMCPFlags(t *testing.T) {
+	isolate(t)
+	t.Setenv("TOKENMETER_MCP_TOKEN", "")
+	// The token check comes before any network call, so this is a usage error even with no service.
+	if code, _, errs := call("mcp", "--listen", "127.0.0.1:0", "--addr", "127.0.0.1:1"); code != exitUsage || !strings.Contains(errs, "bearer token") {
+		t.Fatalf("mcp --listen without a token = %d %q", code, errs)
+	}
+	if code, _, _ := call("mcp", "--mcp-token-file", "x"); code != exitUsage {
+		t.Fatalf("--mcp-token-file without --listen = %d", code)
+	}
+	for h, ok := range map[string]bool{"Bearer abc": true, "bearer abc": true, " Bearer  abc ": true, "Basic abc": false, "Bearer abd": false, "abc": false} {
+		if bearerOK(h, "abc") != ok {
+			t.Errorf("bearerOK(%q) = %v", h, !ok)
+		}
+	}
+}
