@@ -35,8 +35,10 @@ signs:
     signature: "${artifact}.sigstore.json"
     args: ["sign-blob", "--yes", "--bundle=${signature}", "${artifact}"]
 
-# The release, its notes and its publishing belong to release.yml.
+# The release, its notes and its publishing belong to release.yml. GoReleaser
+# finds that draft by name, so the name must be the one release.yml gives it.
 release:
+  name_template: "light-tokenmeter {{ .Version }}"
   draft: true
   use_existing_draft: true
   mode: keep-existing
