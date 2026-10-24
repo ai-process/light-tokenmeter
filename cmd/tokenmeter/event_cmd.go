@@ -1,12 +1,12 @@
 package main
 
 import (
-	"crypto/rand"
 	"fmt"
 	"math"
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -29,7 +29,7 @@ func (a *app) eventCmd() *cobra.Command {
 			}
 			ev.Status = s
 			if ev.EventId == "" {
-				ev.EventId = newUUID()
+				ev.EventId = uuid.NewString()
 			}
 			if cost != "" {
 				usd, err := strconv.ParseFloat(cost, 64)
@@ -85,13 +85,4 @@ func (a *app) eventCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "event", Short: "Usage events"}
 	cmd.AddCommand(send)
 	return cmd
-}
-
-// newUUID is a random (version 4) UUID.
-func newUUID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	b[6] = b[6]&0x0f | 0x40
-	b[8] = b[8]&0x3f | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }

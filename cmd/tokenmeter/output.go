@@ -12,6 +12,8 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/ai-process/light-tokenmeter/pkg/client"
 )
 
 // printer writes a result as a table for people, or as JSON or CSV for
@@ -120,7 +122,7 @@ func (p *printer) usd(nano int64) string {
 	if p.format == "csv" {
 		return exactUSD(nano)
 	}
-	return fmt.Sprintf("$%.4f", float64(nano)/1e9)
+	return fmt.Sprintf("$%.4f", client.USD(nano))
 }
 
 // exactUSD writes nano-USD as dollars without float rounding: 36000000 is 0.036.

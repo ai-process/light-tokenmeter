@@ -248,7 +248,8 @@ tokenmeter completion zsh > "${fpath[1]}/_tokenmeter"             # also bash an
   --token keychain`, then `tokenmeter context store-token prod` reads the token without echo.
   They live in `~/.config/tokenmeter/config.yaml` (`TOKENMETER_CONFIG`); a token source is
   `env:VAR`, `file:PATH` or `keychain`. Flags win over `TOKENMETER_ADDR`, `TOKENMETER_TLS`,
-  `TOKENMETER_HTTP` and `TOKENMETER_TOKEN`, which win over the context.
+  `TOKENMETER_HTTP` and `TOKENMETER_TOKEN`, which win over the current context; a context named
+  with `--context` or `TOKENMETER_CONTEXT` wins over them, so its token never goes elsewhere.
 - Exit codes: 0 done, 1 failed, 2 bad usage, 4 not authenticated or not allowed, 5 not found,
   6 rejected as invalid, 7 unavailable (retry later).
 - [`pkg/client`](pkg/client) is the Go client underneath: `Record` in batches of 500, `Summary`

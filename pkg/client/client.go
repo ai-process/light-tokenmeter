@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"google.golang.org/grpc"
@@ -25,6 +26,9 @@ const MaxBatch = 500
 // MinWindow is the shortest window Summary splits a truncated one into.
 const MinWindow = time.Hour
 
+// parallel caps the summary calls one Client has in flight while splitting.
+const parallel = 8
+
 // Options say where light-tokenmeter is and how to reach it.
 type Options struct {
 	Addr      string      // gRPC host:port
@@ -37,8 +41,9 @@ type Options struct {
 
 // Client talks to one light-tokenmeter. It is safe for concurrent use.
 type Client struct {
-	conn *grpc.ClientConn
-	svc  usagev1.UsageServiceClient
+	conn  *grpc.ClientConn
+	svc   usagev1.UsageServiceClient
+	slots chan struct{}
 }
 
 // New connects lazily: the first call dials.
@@ -62,7 +67,7 @@ func New(o Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{conn: conn, svc: usagev1.NewUsageServiceClient(conn)}, nil
+	return &Client{conn: conn, svc: usagev1.NewUsageServiceClient(conn), slots: make(chan struct{}, parallel)}, nil
 }
 
 // Close releases the connection.
@@ -101,7 +106,15 @@ func (c *Client) Record(ctx context.Context, events ...*usagev1.UsageEvent) (cre
 // (truncated), Summary fetches its halves and merges them, down to MinWindow;
 // truncated is true only if a window that short is still capped.
 func (c *Client) Summary(ctx context.Context, req *usagev1.GetUsageSummaryRequest) (rows []*usagev1.UsageSummaryRow, truncated bool, err error) {
+	// A slot is held for the call only, never across the recursion, so halves
+	// waiting for their own halves cannot starve each other.
+	select {
+	case c.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	}
 	res, err := c.svc.GetUsageSummary(ctx, req)
+	<-c.slots
 	if err != nil {
 		return nil, false, err
 	}
@@ -117,12 +130,19 @@ func (c *Client) Summary(ctx context.Context, req *usagev1.GetUsageSummaryReques
 	left.To = timestamppb.New(mid)
 	right := proto.Clone(req).(*usagev1.GetUsageSummaryRequest)
 	right.From = timestamppb.New(mid)
-	a, ta, err := c.Summary(ctx, left)
-	if err != nil {
-		return nil, false, err
-	}
-	b, tb, err := c.Summary(ctx, right)
-	if err != nil {
+	// The halves are independent; fetching them together keeps a deep split
+	// within one deadline.
+	var b []*usagev1.UsageSummaryRow
+	var tb bool
+	var errB error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		b, tb, errB = c.Summary(ctx, right)
+	}()
+	a, ta, errA := c.Summary(ctx, left)
+	<-done
+	if err := errors.Join(errA, errB); err != nil {
 		return nil, false, err
 	}
 	// A day split at mid shows up in both halves; its parts add up.
@@ -176,12 +196,6 @@ func Merge(rows []*usagev1.UsageSummaryRow, byDay bool) []*usagev1.UsageSummaryR
 // USD converts nano-USD, the API's unit of cost, to dollars.
 func USD(nanousd int64) float64 { return float64(nanousd) / 1e9 }
 
-// Window is [from, to) for a duration ending now, in UTC, e.g. Last(7*24*time.Hour).
-func Last(d time.Duration) (from, to time.Time) {
-	to = time.Now().UTC()
-	return to.Add(-d), to
-}
-
 // ParseDuration reads Go durations plus d (days) and w (weeks): 7d, 2w, 36h.
 func ParseDuration(s string) (time.Duration, error) {
 	if n := len(s); n > 1 && (s[n-1] == 'd' || s[n-1] == 'w') {
@@ -192,6 +206,9 @@ func ParseDuration(s string) (time.Duration, error) {
 		unit := 24 * time.Hour
 		if s[n-1] == 'w' {
 			unit *= 7
+		}
+		if v > int(math.MaxInt64/int64(unit)) {
+			return 0, fmt.Errorf("duration %q is too long", s)
 		}
 		return time.Duration(v) * unit, nil
 	}

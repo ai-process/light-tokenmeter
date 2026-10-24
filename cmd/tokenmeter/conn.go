@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/ai-process/light-tokenmeter/pkg/client"
@@ -25,6 +26,7 @@ type target struct {
 
 	ctx      *Context // the selected context, nil without one
 	ctxName  string
+	envToken string // TOKENMETER_TOKEN, unless a context was asked for by name
 	warn     io.Writer
 	resolved bool
 }
@@ -58,15 +60,26 @@ func (t *target) resolve() error {
 	if c == nil {
 		c = &Context{}
 	}
-	t.addr = firstNonEmpty(t.addr, os.Getenv("TOKENMETER_ADDR"), c.Addr, "localhost:9090")
+	// A context asked for by name wins over the environment, so its token never
+	// goes to an address left in the shell, nor the shell's token to its address.
+	env := os.Getenv
+	if asked != "" {
+		env = func(string) string { return "" }
+	}
+	t.envToken = env("TOKENMETER_TOKEN")
+	t.addr = firstNonEmpty(t.addr, env("TOKENMETER_ADDR"), c.Addr, "localhost:9090")
 	if !t.tlsSet {
-		if v := os.Getenv("TOKENMETER_TLS"); v != "" {
-			t.tls = v == "true" || v == "1"
+		if v := env("TOKENMETER_TLS"); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return usageError{fmt.Errorf("TOKENMETER_TLS=%q: want true or false", v)}
+			}
+			t.tls = b
 		} else {
 			t.tls = c.TLS
 		}
 	}
-	t.http = firstNonEmpty(t.http, os.Getenv("TOKENMETER_HTTP"), c.HTTP)
+	t.http = firstNonEmpty(t.http, env("TOKENMETER_HTTP"), c.HTTP)
 	if t.http == "" {
 		host, _, err := net.SplitHostPort(t.addr)
 		if err != nil {
@@ -92,8 +105,8 @@ func (t *target) token() (string, error) {
 	if t.tokenFile != "" {
 		return readKeyFile(t.tokenFile)
 	}
-	if k := os.Getenv("TOKENMETER_TOKEN"); k != "" {
-		return k, nil
+	if t.envToken != "" {
+		return t.envToken, nil
 	}
 	if t.ctx != nil && !t.ctx.Token.empty() {
 		k, err := t.ctx.Token.read(t.ctxName)

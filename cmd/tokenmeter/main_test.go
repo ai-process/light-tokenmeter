@@ -123,6 +123,20 @@ func TestContexts(t *testing.T) {
 	if _, out, _ := call("context", "list"); !strings.Contains(out, "*  prod") {
 		t.Fatalf("context list: %s", out)
 	}
+
+	// A context asked for by name beats the shell's address and token.
+	t.Setenv("TOKENMETER_ADDR", "localhost:9090")
+	tg = target{context: "prod"}
+	if tok, _ := tg.token(); tok != "tok-file" || tg.addr != "tm.example.com:443" {
+		t.Fatalf("named context: addr %s token %q", tg.addr, tok)
+	}
+	t.Setenv("TOKENMETER_TLS", "yes please")
+	if code, _, _ := call("usage", "summary"); code != exitUsage {
+		t.Fatalf("bad TOKENMETER_TLS = %d, want %d", code, exitUsage)
+	}
+	if info, err := os.Stat(filepath.Join(filepath.Dir(p), "tokenmeter", "prod.token")); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("token file: %v %v", info.Mode(), err)
+	}
 }
 
 // serve runs the real gRPC and HTTP servers over a fresh database with these

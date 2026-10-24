@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -28,16 +27,6 @@ const exitCodesHelp = `Exit codes: 0 done, 1 failed, 2 bad usage,
 
 type usageError struct{ error }
 
-// httpError is a non-2xx answer from the HTTP API.
-type httpError struct {
-	status int
-	body   string
-}
-
-func (e httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.status, e.body)
-}
-
 func exitCode(err error) int {
 	if err == nil {
 		return exitOK
@@ -45,20 +34,6 @@ func exitCode(err error) int {
 	var u usageError
 	if errors.As(err, &u) {
 		return exitUsage
-	}
-	var h httpError
-	if errors.As(err, &h) {
-		switch {
-		case h.status == http.StatusUnauthorized || h.status == http.StatusForbidden:
-			return exitAuth
-		case h.status == http.StatusNotFound:
-			return exitNotFound
-		case h.status == http.StatusTooManyRequests || h.status >= 500:
-			return exitRetry
-		case h.status >= 400:
-			return exitRejected
-		}
-		return exitFailed
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) || errors.Is(err, context.DeadlineExceeded) {

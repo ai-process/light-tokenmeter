@@ -3,8 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -411,38 +411,23 @@ func (a *app) exportCmd() *cobra.Command {
 			}
 			rows = client.Merge(rows, true)
 			sort.SliceStable(rows, func(i, j int) bool { return rows[i].GetBucket().GetSeconds() < rows[j].GetBucket().GetSeconds() })
-			var w io.Writer = a.stdout
-			if out != "" {
-				f, err := os.Create(out)
-				if err != nil {
-					return err
-				}
-				defer f.Close()
-				w = f
+			if out == "" {
+				return writeExport(&printer{w: a.stdout, format: format}, req, groups, rows, truncated)
 			}
-			p := &printer{w: w, format: format}
-			if format == "json" {
-				return p.data(map[string]any{"from": req.GetFrom(), "to": req.GetTo(), "rows": messages(rows), "truncated": truncated})
+			// Into a temporary file renamed at the end, so a failed write leaves no partial export.
+			f, err := os.CreateTemp(filepath.Dir(out), "."+filepath.Base(out)+".*")
+			if err != nil {
+				return err
 			}
-			dims := ordered(groups)
-			header := []string{"day"}
-			for _, d := range dims {
-				header = append(header, d)
+			defer os.Remove(f.Name())
+			if err := writeExport(&printer{w: f, format: format}, req, groups, rows, truncated); err != nil {
+				f.Close()
+				return err
 			}
-			header = append(header, "requests", "tokens_input", "tokens_output", "tokens_total", "cache_read_tokens",
-				"cache_write_tokens", "sum_duration_ms", "cost_usd", "cost_nanousd")
-			var lines [][]string
-			for _, r := range rows {
-				line := []string{r.GetBucket().AsTime().UTC().Format(time.DateOnly)}
-				for _, d := range dims {
-					line = append(line, dimValue(r, d))
-				}
-				lines = append(lines, append(line, strconv.FormatInt(r.GetRequestCount(), 10), strconv.FormatInt(r.GetTokensInput(), 10),
-					strconv.FormatInt(r.GetTokensOutput(), 10), strconv.FormatInt(r.GetTokensTotal(), 10),
-					strconv.FormatInt(r.GetCacheReadTokens(), 10), strconv.FormatInt(r.GetCacheWriteTokens(), 10),
-					strconv.FormatInt(r.GetSumDurationMs(), 10), exactUSD(r.GetCostNanousd()), strconv.FormatInt(r.GetCostNanousd(), 10)))
+			if err := f.Close(); err != nil {
+				return err
 			}
-			return p.rows(header, lines)
+			return os.Rename(f.Name(), out)
 		},
 	}
 	q.flags(cmd)
@@ -451,4 +436,29 @@ func (a *app) exportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&out, "out", "", "write to this file instead of stdout")
 	_ = cmd.RegisterFlagCompletionFunc("format", cobra.FixedCompletions([]string{"csv", "json"}, cobra.ShellCompDirectiveNoFileComp))
 	return cmd
+}
+
+func writeExport(p *printer, req *usagev1.GetUsageSummaryRequest, groups []string, rows []*usagev1.UsageSummaryRow, truncated bool) error {
+	if p.format == "json" {
+		return p.data(map[string]any{"from": req.GetFrom(), "to": req.GetTo(), "rows": messages(rows), "truncated": truncated})
+	}
+	dims := ordered(groups)
+	header := []string{"day"}
+	for _, d := range dims {
+		header = append(header, d)
+	}
+	header = append(header, "requests", "tokens_input", "tokens_output", "tokens_total", "cache_read_tokens",
+		"cache_write_tokens", "sum_duration_ms", "cost_usd", "cost_nanousd")
+	var lines [][]string
+	for _, r := range rows {
+		line := []string{r.GetBucket().AsTime().UTC().Format(time.DateOnly)}
+		for _, d := range dims {
+			line = append(line, dimValue(r, d))
+		}
+		lines = append(lines, append(line, strconv.FormatInt(r.GetRequestCount(), 10), strconv.FormatInt(r.GetTokensInput(), 10),
+			strconv.FormatInt(r.GetTokensOutput(), 10), strconv.FormatInt(r.GetTokensTotal(), 10),
+			strconv.FormatInt(r.GetCacheReadTokens(), 10), strconv.FormatInt(r.GetCacheWriteTokens(), 10),
+			strconv.FormatInt(r.GetSumDurationMs(), 10), exactUSD(r.GetCostNanousd()), strconv.FormatInt(r.GetCostNanousd(), 10)))
+	}
+	return p.rows(header, lines)
 }

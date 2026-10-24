@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,11 +19,11 @@ import (
 // anything longer, as the server does past its row limit.
 type capped struct {
 	usagev1.UnimplementedUsageServiceServer
-	calls int
+	calls atomic.Int32
 }
 
 func (c *capped) GetUsageSummary(_ context.Context, req *usagev1.GetUsageSummaryRequest) (*usagev1.GetUsageSummaryResponse, error) {
-	c.calls++
+	c.calls.Add(1)
 	from, to := req.GetFrom().AsTime(), req.GetTo().AsTime()
 	day := timestamppb.New(from.Truncate(24 * time.Hour))
 	if to.Sub(from) > 2*time.Hour {
@@ -62,8 +63,8 @@ func TestSummarySplitsCappedWindows(t *testing.T) {
 	if truncated || len(rows) != 1 || rows[0].GetRequestCount() != 10 || rows[0].GetCostNanousd() != 100 {
 		t.Fatalf("rows = %v, truncated = %v", rows, truncated)
 	}
-	if fake.calls < 3 {
-		t.Fatalf("calls = %d: the window was not split", fake.calls)
+	if n := fake.calls.Load(); n < 3 {
+		t.Fatalf("calls = %d: the window was not split", n)
 	}
 
 	// A window that stays capped at MinWindow is reported, not looped on.
@@ -110,7 +111,7 @@ func TestParseDuration(t *testing.T) {
 			t.Errorf("ParseDuration(%q) = %v, %v", in, got, err)
 		}
 	}
-	for _, in := range []string{"", "d", "0d", "-1d", "1.5d", "7x", "+3d", "-5h"} {
+	for _, in := range []string{"", "d", "0d", "-1d", "1.5d", "7x", "+3d", "-5h", "200000d", "99999999999w"} {
 		if _, err := ParseDuration(in); err == nil {
 			t.Errorf("ParseDuration(%q) accepted", in)
 		}
