@@ -1,0 +1,63 @@
+# The tokenmeter CLI on the GitHub release that release.yml drafted: archives,
+# a signed checksums.txt and SBOMs. The service itself ships as an image.
+# The Homebrew tap switches on only when HOMEBREW_TAP_TOKEN exists.
+version: 2
+project_name: tokenmeter
+
+builds:
+  - id: cli
+    main: ./cmd/tokenmeter
+    binary: tokenmeter
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+
+archives:
+  - id: cli
+    ids: [cli]
+    formats: [tar.gz]
+    name_template: "tokenmeter_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, NOTICE]
+
+checksum:
+  name_template: checksums.txt
+
+# One SPDX SBOM per archive, built by syft.
+sboms:
+  - artifacts: archive
+
+# A keyless signature of checksums.txt covers every archive listed in it.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: ["sign-blob", "--yes", "--bundle=${signature}", "${artifact}"]
+
+# The release, its notes and its publishing belong to release.yml.
+release:
+  draft: true
+  use_existing_draft: true
+  mode: keep-existing
+  replace_existing_artifacts: true
+
+changelog:
+  disable: true
+
+brews:
+  - name: tokenmeter
+    ids: [cli]
+    homepage: https://github.com/ai-process/light-tokenmeter
+    description: Usage reports and tokens for light-tokenmeter
+    license: Apache-2.0
+    repository:
+      owner: ai-process
+      name: homebrew-tap
+      token: '{{ if isEnvSet "HOMEBREW_TAP_TOKEN" }}{{ .Env.HOMEBREW_TAP_TOKEN }}{{ end }}'
+    skip_upload: '{{ if isEnvSet "HOMEBREW_TAP_TOKEN" }}false{{ else }}true{{ end }}'
+    install: |
+      bin.install "tokenmeter"
+      generate_completions_from_executable(bin/"tokenmeter", "completion")
+    test: |
+      system "#{bin}/tokenmeter", "version"
