@@ -60,6 +60,11 @@ curl -s "localhost:8080/v1/usage/summary?from=2020-01-01T00:00:00Z&to=2100-01-01
 
 The schema is created automatically on startup.
 
+To deploy it together with Keystone and ktms-admin through an AI assistant, use the
+[Claude Code plugin](https://github.com/ai-process/ktms#claude-code-plugin-and-skills)
+(`/ktms:deploy`) or the [Deploy the stack](https://ai-process.dev/docs/prompts/deploy-stack/)
+prompt.
+
 ## Resource footprint
 
 The image `coyl/light-tokenmeter:0.1.1` was ~28 MB uncompressed and ~11 MB to download for
@@ -288,7 +293,9 @@ server never records usage. Claude Code (`.mcp.json`), Claude Desktop and Cursor
 Together with Keystone's `ktms mcp` (its `get_spend`), an assistant can say what was spent and how
 much of a cap is left. Over the network, `tokenmeter mcp --listen 127.0.0.1:8766` serves
 streamable HTTP at `/mcp` with `Authorization: Bearer <token>` from `TOKENMETER_MCP_TOKEN` (16+
-characters); it speaks plain HTTP, so keep it on localhost or behind a TLS proxy.
+characters); it speaks plain HTTP, so keep it on localhost or behind a TLS proxy. Keystone's
+[Claude Code plugin](https://github.com/ai-process/ktms#claude-code-plugin-and-skills) connects this
+server for you, with the `/ktms:usage-reports` skill.
 
 ## API reference
 
