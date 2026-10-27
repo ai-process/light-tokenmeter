@@ -281,3 +281,24 @@ func TestStuckBatchIsPostponedAfterHoldMax(t *testing.T) {
 	s.drain(t, ok)
 	s.requireInStep(t, totals{})
 }
+
+// A tool call through an MCP gateway reaches ClickHouse with its server, tool
+// and result size.
+func TestReplicatorCopiesToolCalls(t *testing.T) {
+	s := newStack(t)
+	at := time.Now().UTC()
+	id := uuid.New()
+	_, err := s.repo.InsertBatch(context.Background(), []*domain.UsageEvent{{
+		EventID: id, OccurredAt: &at, UserID: "u", ProjectID: "p", ActionID: "a",
+		Vendor: "mcp", Model: "github__create_issue", Status: domain.StatusSuccess, DurationMs: 42,
+		ToolServer: "github", ToolName: "create_issue", ResponseBytes: 512,
+	}})
+	require.NoError(t, err)
+	s.drain(t, NewReplicator(s.repo, s.ch.Conn(), 200, 5*time.Millisecond))
+
+	var server, tool string
+	var size int64
+	require.NoError(t, s.ch.Conn().QueryRow(context.Background(),
+		`SELECT tool_server, tool_name, response_bytes FROM usage_events WHERE event_id = ?`, id).Scan(&server, &tool, &size))
+	require.Equal(t, []any{"github", "create_issue", int64(512)}, []any{server, tool, size})
+}

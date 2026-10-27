@@ -8,6 +8,12 @@ All notable changes to light-tokenmeter are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `tool_call` on usage events (`server`, `tool`, `response_bytes`), sent by an MCP gateway such as
+  Keystone's for each tool call it forwards, stored in Postgres and ClickHouse as `tool_server`,
+  `tool_name` and `response_bytes`. A `tool_call` must name both a server (up to 64 characters)
+  and a tool (up to 128).
+
 ## [1.1.0] - 2026-10-24
 
 Tools for people and AI assistants; the service and its APIs are unchanged apart from the

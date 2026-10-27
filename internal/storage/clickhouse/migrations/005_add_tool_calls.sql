@@ -1,0 +1,1 @@
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS tool_server String DEFAULT '', ADD COLUMN IF NOT EXISTS tool_name String DEFAULT '', ADD COLUMN IF NOT EXISTS response_bytes Int64 DEFAULT 0

@@ -256,6 +256,9 @@ func protoToEvent(pbEvent *pb.UsageEvent) (*domain.UsageEvent, error) {
 		CostNanoUSD:      pbEvent.CostNanousd,
 		CacheReadTokens:  pbEvent.CacheReadTokens,
 		CacheWriteTokens: pbEvent.CacheWriteTokens,
+		ToolServer:       pbEvent.GetToolCall().GetServer(),
+		ToolName:         pbEvent.GetToolCall().GetTool(),
+		ResponseBytes:    pbEvent.GetToolCall().GetResponseBytes(),
 	}
 
 	// Parse event_id
