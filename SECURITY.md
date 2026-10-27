@@ -17,7 +17,7 @@ Actions' OIDC identity (keyless: there is no key to leak), and carry an SBOM and
 Each platform manifest is signed too. Use cosign 3 and pin the identity to the exact tag:
 
 ```bash
-V=v1.1.0
+V=v1.2.0
 cosign verify coyl/light-tokenmeter:${V#v} \
   --certificate-identity "https://github.com/ai-process/light-tokenmeter/.github/workflows/docker-publish.yml@refs/tags/$V" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
