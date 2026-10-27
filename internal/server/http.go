@@ -142,6 +142,13 @@ type recordEventRequest struct {
 	CostNanoUSD      int64             `json:"cost_nanousd,omitempty"`
 	CacheReadTokens  int64             `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens int64             `json:"cache_write_tokens,omitempty"`
+	ToolCall         *toolCall         `json:"tool_call,omitempty"`
+}
+
+type toolCall struct {
+	Server        string `json:"server"`
+	Tool          string `json:"tool"`
+	ResponseBytes int64  `json:"response_bytes,omitempty"`
 }
 
 type recordEventResponse struct {
@@ -375,6 +382,9 @@ func httpRequestToEvent(req *recordEventRequest) (*domain.UsageEvent, error) {
 		CostNanoUSD:      req.CostNanoUSD,
 		CacheReadTokens:  req.CacheReadTokens,
 		CacheWriteTokens: req.CacheWriteTokens,
+	}
+	if tc := req.ToolCall; tc != nil {
+		event.ToolServer, event.ToolName, event.ResponseBytes = tc.Server, tc.Tool, tc.ResponseBytes
 	}
 
 	if err := event.EventID.UnmarshalText([]byte(req.EventID)); err != nil {

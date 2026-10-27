@@ -180,7 +180,7 @@ func (r *Repository) OutboxBacklog(ctx context.Context) (int64, time.Duration, e
 const eventColumns = `event_id, created_at, occurred_at, user_id, project_id, action_id,
 	vendor, model, status, duration_ms, tokens_input, tokens_output, tokens_total,
 	COALESCE(error_class, ''), COALESCE(vendor_http_status, 0), meta, cost_nanousd,
-	cache_read_tokens, cache_write_tokens`
+	cache_read_tokens, cache_write_tokens, tool_server, tool_name, response_bytes`
 
 func (r *Repository) eventsByID(ctx context.Context, ids []uuid.UUID) ([]*domain.UsageEvent, error) {
 	rows, err := r.pool.Query(ctx, `SELECT `+eventColumns+` FROM usage_events WHERE event_id = ANY($1)`, ids)
@@ -202,7 +202,7 @@ func scanEvents(rows pgx.Rows) ([]*domain.UsageEvent, error) {
 		if err := rows.Scan(&e.EventID, &e.CreatedAt, &e.OccurredAt, &e.UserID, &e.ProjectID, &e.ActionID,
 			&e.Vendor, &e.Model, &status, &e.DurationMs, &e.TokensInput, &e.TokensOutput, &e.TokensTotal,
 			&e.ErrorClass, &e.VendorHTTPStatus, &meta, &e.CostNanoUSD,
-			&e.CacheReadTokens, &e.CacheWriteTokens); err != nil {
+			&e.CacheReadTokens, &e.CacheWriteTokens, &e.ToolServer, &e.ToolName, &e.ResponseBytes); err != nil {
 			return nil, fmt.Errorf("scan outbox event: %w", err)
 		}
 		e.Status = domain.Status(status)

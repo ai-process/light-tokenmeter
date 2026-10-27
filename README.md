@@ -152,6 +152,7 @@ An event describes one model call:
 | `meta` | map of string | no | Your own tags, e.g. `{"job_id": "…"}`: non-empty keys, at most 16 KiB of keys and values per event. |
 | `cost_nanousd` | int ≥0 | no | Call cost in nano-USD (1e-9 USD), priced by the caller; stored as-is and never recomputed. |
 | `cache_read_tokens`, `cache_write_tokens` | int ≥0 | no | Input tokens read from and written to the vendor's prompt cache. They are part of `tokens_input`, not added to it, so together they must not exceed it; an event that breaks this is refused. Anthropic reports them outside its `input_tokens`: send the sum of all three as `tokens_input`. |
+| `tool_call` | object | no | A tool call through an MCP gateway such as Keystone's: `server` (≤64 chars) and `tool` (≤128), both set, and `response_bytes` (≥0, the result's size). The gateway sends it with `vendor` `mcp`, `model` `server__tool` and no tokens, so summaries by model count tool calls; the three are stored as `tool_server`, `tool_name` and `response_bytes` in Postgres and ClickHouse. |
 
 Batches (`POST /v1/usage/events:batch`, or `RecordUsageEvents` over gRPC) take up to 500
 events and report how many were created and how many were duplicates:

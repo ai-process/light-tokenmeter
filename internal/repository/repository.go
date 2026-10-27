@@ -45,13 +45,15 @@ func (r *Repository) InsertOne(ctx context.Context, event *domain.UsageEvent) (b
 			vendor, model, status, duration_ms,
 			tokens_input, tokens_output, tokens_total,
 			error_class, vendor_http_status, meta, cost_nanousd,
-			cache_read_tokens, cache_write_tokens
+			cache_read_tokens, cache_write_tokens,
+			tool_server, tool_name, response_bytes
 		) VALUES (
 			$1, $2, $3, $4, $5,
 			$6, $7, $8, $9,
 			$10, $11, $12,
 			$13, $14, $15, $16,
-			$17, $18
+			$17, $18,
+			$19, $20, $21
 		)
 		ON CONFLICT (event_id) DO NOTHING
 	`
@@ -79,6 +81,9 @@ func (r *Repository) InsertOne(ctx context.Context, event *domain.UsageEvent) (b
 		event.CostNanoUSD,
 		event.CacheReadTokens,
 		event.CacheWriteTokens,
+		event.ToolServer,
+		event.ToolName,
+		event.ResponseBytes,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert event: %w", err)
@@ -142,6 +147,9 @@ func (r *Repository) InsertBatch(ctx context.Context, events []*domain.UsageEven
 			event.CostNanoUSD,
 			event.CacheReadTokens,
 			event.CacheWriteTokens,
+			event.ToolServer,
+			event.ToolName,
+			event.ResponseBytes,
 		})
 	}
 
@@ -155,6 +163,7 @@ func (r *Repository) InsertBatch(ctx context.Context, events []*domain.UsageEven
 			"tokens_input", "tokens_output", "tokens_total",
 			"error_class", "vendor_http_status", "meta", "cost_nanousd",
 			"cache_read_tokens", "cache_write_tokens",
+			"tool_server", "tool_name", "response_bytes",
 		},
 		pgx.CopyFromRows(rows),
 	)

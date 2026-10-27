@@ -375,3 +375,29 @@ func TestHTTP_CacheTokens(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(out), `"cache_read_tokens":7,"cache_write_tokens":3`)
 }
+
+func TestToolCallEvents(t *testing.T) {
+	ev, err := protoToEvent(&pb.UsageEvent{
+		EventId: uuid.NewString(), UserId: "svc:agent", ProjectId: "agent", ActionId: "a1",
+		Vendor: "mcp", Model: "github__create_issue", Status: pb.Status_STATUS_SUCCESS, DurationMs: 40,
+		ToolCall: &pb.ToolCall{Server: "github", Tool: "create_issue", ResponseBytes: 512},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []any{"github", "create_issue", int64(512)}, []any{ev.ToolServer, ev.ToolName, ev.ResponseBytes})
+
+	for _, bad := range []*pb.ToolCall{{Server: "github"}, {Tool: "x"}, {Server: strings.Repeat("s", 65), Tool: "x"}, {Server: "s", Tool: "t", ResponseBytes: -1}} {
+		_, err := protoToEvent(&pb.UsageEvent{
+			EventId: uuid.NewString(), UserId: "u", ProjectId: "p", ActionId: "a",
+			Vendor: "mcp", Model: "m", Status: pb.Status_STATUS_SUCCESS, ToolCall: bad,
+		})
+		assert.ErrorContains(t, err, "tool_call", "%v", bad)
+	}
+
+	var req recordEventRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"event_id":"`+uuid.NewString()+`","user_id":"u","project_id":"p",
+		"action_id":"a","vendor":"mcp","model":"docs__search","status":"success","tokens_input":0,"tokens_output":0,
+		"tool_call":{"server":"docs","tool":"search","response_bytes":9}}`), &req))
+	hev, err := httpRequestToEvent(&req)
+	require.NoError(t, err)
+	assert.Equal(t, []any{"docs", "search", int64(9)}, []any{hev.ToolServer, hev.ToolName, hev.ResponseBytes})
+}

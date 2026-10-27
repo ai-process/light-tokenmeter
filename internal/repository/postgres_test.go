@@ -280,3 +280,31 @@ func TestInsertBatchReturnsOnlyNewIDs(t *testing.T) {
 	_, ok := created[retry[2].EventID]
 	require.True(t, ok, "only the new event is reported as created")
 }
+
+// Both insert paths store a tool call's server, tool and result size.
+func TestToolCallsAreStored(t *testing.T) {
+	pool, repo := getTestPool(t)
+	ctx := context.Background()
+	event := func() *domain.UsageEvent {
+		return &domain.UsageEvent{
+			EventID: uuid.New(), UserID: "u1", ProjectID: "p1", ActionID: "a1",
+			Vendor: "mcp", Model: "github__create_issue", Status: domain.StatusSuccess,
+			ToolServer: "github", ToolName: "create_issue", ResponseBytes: 512,
+		}
+	}
+	one, batch := event(), event()
+	_, err := repo.InsertOne(ctx, one)
+	require.NoError(t, err)
+	_, err = repo.InsertBatch(ctx, []*domain.UsageEvent{batch})
+	require.NoError(t, err)
+	for _, id := range []uuid.UUID{one.EventID, batch.EventID} {
+		var server, tool string
+		var size int64
+		require.NoError(t, pool.QueryRow(ctx, `SELECT tool_server, tool_name, response_bytes FROM usage_events WHERE event_id = $1`, id).Scan(&server, &tool, &size))
+		assert.Equal(t, []any{"github", "create_issue", int64(512)}, []any{server, tool, size})
+	}
+	evs, err := repo.eventsByID(ctx, []uuid.UUID{one.EventID})
+	require.NoError(t, err)
+	require.Len(t, evs, 1)
+	assert.Equal(t, "create_issue", evs[0].ToolName, "the outbox hands ClickHouse the tool call too")
+}

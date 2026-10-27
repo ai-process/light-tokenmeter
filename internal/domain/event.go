@@ -73,6 +73,10 @@ type UsageEvent struct {
 	// cache, and written to it, each priced differently from plain input.
 	CacheReadTokens  int64
 	CacheWriteTokens int64
+	// A tool call through an MCP gateway; empty and 0 for an LLM call.
+	ToolServer    string
+	ToolName      string
+	ResponseBytes int64
 }
 
 // Validation errors
@@ -92,6 +96,7 @@ var (
 	ErrTokensMismatch    = errors.New("tokens_total must equal tokens_input + tokens_output")
 	ErrCacheTokens       = errors.New("cache_read_tokens and cache_write_tokens must be >= 0 and together not exceed tokens_input")
 	ErrNegativeCost      = errors.New("cost_nanousd must not be negative")
+	ErrToolCall          = errors.New("tool_call: server up to 64 and tool up to 128 characters, both set, response_bytes >= 0")
 	ErrOccurredAtRange   = errors.New("occurred_at must be between 1900-01-01 and 2262-04-10")
 	ErrErrorClassTooLong = errors.New("error_class exceeds 256 characters")
 	ErrMetaTooLarge      = errors.New("meta exceeds 16384 bytes of keys and values")
@@ -151,6 +156,10 @@ func (e *UsageEvent) Validate() error {
 	}
 	if e.Status == StatusUnspecified {
 		return ErrInvalidStatus
+	}
+	if (e.ToolServer != "" || e.ToolName != "" || e.ResponseBytes != 0) &&
+		(e.ToolServer == "" || e.ToolName == "" || len(e.ToolServer) > MaxVendorLength || len(e.ToolName) > MaxModelLength || e.ResponseBytes < 0) {
+		return ErrToolCall
 	}
 	if e.CostNanoUSD < 0 {
 		return ErrNegativeCost
