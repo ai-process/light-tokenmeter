@@ -8,6 +8,8 @@ All notable changes to light-tokenmeter are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-27
+
 ### Added
 - `tool_call` on usage events (`server`, `tool`, `response_bytes`), sent by an MCP gateway such as
   Keystone's for each tool call it forwards, stored in Postgres and ClickHouse as `tool_server`,
@@ -103,7 +105,8 @@ incompatibly only in a new major version. Upgrade from 0.1.x in one step.
 First release: append-only, idempotent usage events over HTTP and gRPC, daily summaries with
 filters and groupings, and usage by meta.
 
-[Unreleased]: https://github.com/ai-process/light-tokenmeter/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/ai-process/light-tokenmeter/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/ai-process/light-tokenmeter/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/ai-process/light-tokenmeter/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/ai-process/light-tokenmeter/compare/0.1.2...v1.0.0
 [0.1.2]: https://github.com/ai-process/light-tokenmeter/compare/0.1.1...0.1.2
