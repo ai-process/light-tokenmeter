@@ -56,8 +56,8 @@ brews:
     repository:
       owner: ai-process
       name: homebrew-tap
-      token: '{{ if isEnvSet "HOMEBREW_TAP_TOKEN" }}{{ .Env.HOMEBREW_TAP_TOKEN }}{{ end }}'
-    skip_upload: '{{ if isEnvSet "HOMEBREW_TAP_TOKEN" }}false{{ else }}true{{ end }}'
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    skip_upload: '{{ if index .Env "HOMEBREW_TAP_TOKEN" }}false{{ else }}true{{ end }}'
     install: |
       bin.install "tokenmeter"
       generate_completions_from_executable(bin/"tokenmeter", "completion")
