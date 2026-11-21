@@ -8,6 +8,12 @@ All notable changes to light-tokenmeter are listed here. The format follows
 
 ## [Unreleased]
 
+### Security
+- Go 1.27.4: fixes GO-2026-6859, an HTTP/1 server crash through a header race in
+  `http.MaxBytesReader` that a remote client could trigger.
+- `github.com/andybalholm/brotli` v1.2.7 (GO-2026-6888) and `github.com/klauspost/compress`
+  v1.20.2 (GO-2026-6865).
+
 ## [1.2.0] - 2026-10-27
 
 ### Added

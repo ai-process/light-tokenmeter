@@ -1,4 +1,4 @@
-FROM golang:1.27.3-alpine3.23 AS builder
+FROM golang:1.27.4-alpine3.23 AS builder
 RUN apk add --no-cache 'ca-certificates>=20261020-r0'
 ARG TARGETOS=linux
 ARG TARGETARCH
